@@ -45,6 +45,7 @@ textarea{min-height:88px;resize:vertical} .row{display:flex;gap:8px;align-items:
 .scanFrame{position:absolute;left:15%;right:15%;top:26%;aspect-ratio:1/1;border:3px solid #fff;border-radius:14px;box-shadow:0 0 0 999px rgba(0,0,0,.18)}
 .manualQr{display:grid;grid-template-columns:1fr auto;gap:8px}.manualQr input{min-width:0}
 .qrActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}.qrActions button{padding:14px 10px;font-weight:700}
+.syncPhoneActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.syncPhoneActions button{font-weight:750}.syncQrImage{display:block;width:min(74vw,380px);height:auto;margin:12px auto;padding:12px;background:#fff;border:1px solid #d1d5db;border-radius:12px;image-rendering:pixelated}.syncQrWait{text-align:center}.syncQrWait .small{margin-top:8px}
 
 .searchWrap{position:relative}.suggestBox{position:absolute;left:0;right:0;top:100%;z-index:35;background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:0 8px 24px rgba(0,0,0,.14);max-height:340px;overflow:auto;margin-top:4px}.suggestItem{padding:10px 12px;border-bottom:1px solid #eef0f2;cursor:pointer}.suggestItem:last-child{border-bottom:0}.suggestItem:active{background:#eef5fc}.suggestTitle{font-weight:750}.modegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.modebtn{padding:20px 14px;text-align:left;min-height:130px}.modebtn .big{font-size:20px}.modebtn.primary .small{color:#e8f2ff}.modebtn.secondary{background:#fff}.modeicon{font-size:27px;margin-bottom:8px}.inactiveCard{opacity:.78}.statusrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.timerpill{display:inline-block;padding:5px 9px;border-radius:999px;background:#eef1f5;font-size:12px;font-weight:700}.filtergrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.repairActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.repairActions button{font-weight:700}.homeperson{max-width:520px}.modehint{margin-top:6px}.dangerbox{border-color:#efc1bc;background:#fff8f7}@media(max-width:620px){.modegrid,.filtergrid{grid-template-columns:1fr}.modebtn{min-height:112px}}
 
@@ -91,7 +92,7 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
   <div class="big">Ava XLSX või DOLD pakett</div>
   <p class="small">Vali XLSX töövihik, töö üleandmise fail (.dtc) või seadmete sünkroonimispakett (.dtcs).</p>
   <button onclick="selectNewWorkbook()">VALI FAIL</button>
-  <input id="xlsxFileInput" type="file" accept=".xlsx,.dtc,.dtcs,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.dold.techcontrol.workpackage,application/zip" onchange="handleImportFile(event)" style="display:none">
+  <input id="xlsxFileInput" type="file" accept=".xlsx,.dtc,.dtc.zip,.dtcs,.dtcs.zip,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.dold.techcontrol.workpackage,application/vnd.dold.techcontrol.syncpackage,application/zip" onchange="handleImportFile(event)" style="display:none">
  </div>
  <div id="fileState" class="card fileok hidden">XLSX faili pole veel imporditud.</div>
  <div class="card">
@@ -115,14 +116,19 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
   <p class="small">Vali teiselt telefonilt saadud DOLD TechControli .dtc pakett. Terviklus kontrollitakse enne võrdluskuva.</p>
   <button onclick="receiveWorkPackage()">VÕTA TÖÖ VASTU</button>
  </div>
- <div class="card" id="syncSection">
+  <div class="card" id="syncSection">
   <div class="big">SEADMETE SÜNKROONIMINE</div>
-  <p class="small">Mõlemad telefonid jätkavad tööd. Saada .dtcs muudatuste pakett, seejärel vaheta suund ja saada teise telefoni muudatused tagasi.</p>
+  <div class="topgap"><div class="big">SÜNKROONI TELEFONIGA</div>
+  <p class="small">Ühenda telefonid sama Wi-Fi / LAN võrku. Üks telefon näitab ajutist QR-koodi, teine skaneerib selle DOLD TechControliga.</p>
+  <div class="syncPhoneActions"><button id="lanShowQrBtn" class="primary" disabled onclick="showDirectSyncQr()">NÄITA QR</button><button id="lanScanQrBtn" disabled onclick="startDirectSyncScanner()">SKANEERI QR</button></div>
+  </div>
   <div id="syncLocalStatus" class="small topgap"></div>
-  <button id="syncBaselineBtn" class="primary topgap" disabled onclick="shareSyncBaseline()">VALMISTA TEINE TELEFON</button>
-  <button id="syncSendBtn" disabled onclick="shareSyncDelta()">SAADA MUUDATUSED</button>
-  <button id="syncReceiveBtn" disabled onclick="receiveSyncPackage()">VÕTA MUUDATUSED VASTU</button>
-  <p class="small">Esimene pakett kopeerib baastööfaili ainult teise telefoni esmakordseks ettevalmistuseks. Hilisemad .dtcs paketid sisaldavad ainult loogilisi muudatusi. ANNA TÖÖ ÜLE jääb eraldi töö üleandmiseks.</p>
+  <hr><div class="big">PAKETIGA SÜNKROONIMINE</div>
+  <p class="small">Kui kohalik võrk pole saadaval, kasuta .dtcs paketti ja Androidi Quick Share'i või muud jagamisviisi.</p>
+  <button id="syncBaselineBtn" class="topgap" disabled onclick="shareSyncBaseline()">VALMISTA TEINE TELEFON PAKETIGA</button>
+  <button id="syncSendBtn" disabled onclick="shareSyncDelta()">SAADA MUUDATUSTE PAKETT</button>
+  <button id="syncReceiveBtn" disabled onclick="receiveSyncPackage()">VÕTA MUUDATUSTE PAKETT VASTU</button>
+  <p class="small">ANNA TÖÖ ÜLE ja VÕTA TÖÖ VASTU jäävad eraldi ühe telefoni töö üleandmiseks.</p>
  </div>
 
 </section>
@@ -1127,7 +1133,7 @@ async function decodeCanvasRobust(canvas){
 
 async function startQrScanner(mode="audit"){
  S.qrMode=mode||"audit";
- if(!S.zip){
+ if(!S.zip && S.qrMode!=="directSync"){
    toast("Impordi kõigepealt XLSX fail");
    showTab("data");
    return;

@@ -7,7 +7,9 @@ const TC = {schema:1, dbId:null, registryKey:'', registryTokens:[], cycle:null,
   sync:null, deviceId:'', pendingSyncRowIds:null, pendingSemanticRows:null,
   startupLoaded:false, activated:false, startupTask:null, startupError:''};
 const META_NAME='DOLD.TechControl.v1';
-const WORK_PACKAGE_MIME='application/zip';
+const WORK_PACKAGE_FORMAT='DOLD-TECHCONTROL-WORK-PACKAGE';
+const WORK_PACKAGE_MIME='application/vnd.dold.techcontrol.workpackage';
+const SYNC_PACKAGE_MIME='application/vnd.dold.techcontrol.syncpackage';
 const APP_VERSION='0.5.5';
 const cloneData=v=>JSON.parse(JSON.stringify(v));
 let appDialogResolve=null;
@@ -133,7 +135,7 @@ function captureWorkspaceSummary(meta={}){
     const ak=rSortKey(a),bk=rSortKey(b);return bk-ak;
   })[0];
   const stamp=latest?`${latest.date}${excelClock(latest.end||latest.start)?' '+excelClock(latest.end||latest.start):''}`:'';
-  return {controlCount:TC.records.length,defectCount:TC.allDefects.length,openDefects:S.existingDefects.length,activeCount:active.length,checkedCount:checked,latestInspection:stamp,latestInspectionKey:latest?rSortKey(latest):0,updatedAt:Object.hasOwn(meta,'updatedAt')?meta.updatedAt:(TC.updatedAt??null),revision:Object.hasOwn(meta,'revision')?meta.revision:(TC.revision??0)};
+  return {fileName:S.fileName||'',objectCount:S.cabinets.length,controlCount:TC.records.length,defectCount:TC.allDefects.length,openDefects:S.existingDefects.length,activeCount:active.length,checkedCount:checked,latestInspection:stamp,latestInspectionKey:latest?rSortKey(latest):0,updatedAt:Object.hasOwn(meta,'updatedAt')?meta.updatedAt:(TC.updatedAt??null),revision:Object.hasOwn(meta,'revision')?meta.revision:(TC.revision??0)};
 }
 function rSortKey(r){const date=String(r.date||'');const time=excelClock(r.end||r.start);const ms=Date.parse(date+(time?'T'+time+'Z':'T00:00:00Z'));return Number.isFinite(ms)?ms:0;}
 function freshnessRelation(local,embedded,localSummary,incomingSummary,externalIsOriginal){
@@ -163,12 +165,43 @@ function renderStartupWorkspace(){
   host.innerHTML=`${TC.startupWarning?`<div class="badge warn">${esc(TC.startupWarning)}</div>`:''}<div><b>Aktiivne tööfail:</b><br>${esc(S.fileName)}</div><div class="small topgap">Kontroll: ${s.checkedCount} / ${s.activeCount}<br>Puudused: ${s.openDefects}<br>Viimane kontroll: ${esc(s.latestInspection||'puudub')}<br>Viimane muudatus: ${esc(localDateTime(s.updatedAt))}</div>${TC.activated?'<div class="badge ok topgap">Tööfail on avatud</div>':'<button class="primary topgap" onclick="continueLastWorkingFile()">JÄTKA VIIMASE TÖÖFAILIGA</button>'}`;
 }
 function selectNewWorkbook(){const card=$('workbookImportCard'),input=$('xlsxFileInput');card?.classList.remove('hidden');input?.click();}
-function handleImportFile(ev){const file=ev.target.files?.[0];if(!file)return;if(/\.dtcs$/i.test(file.name)){if(typeof importSyncPackage==='function')importSyncPackage(ev);else alert('Sünkroonimispaketi vastuvõtt pole saadaval.');return;}if(/\.dtc$/i.test(file.name)){if(typeof importWorkPackage==='function')importWorkPackage(ev);else alert('Tööpaketi vastuvõtt pole saadaval.');return;}importXlsx(ev);}
+function bytesHaveZipSignature(bytes){return bytes?.length>=4&&bytes[0]===0x50&&bytes[1]===0x4b&&((bytes[2]===0x03&&bytes[3]===0x04)||(bytes[2]===0x05&&bytes[3]===0x06)||(bytes[2]===0x07&&bytes[3]===0x08));}
+async function detectIncomingFileKind(bytes,fileName=''){
+  const archiveName=/\.(?:dtc|dtcs|zip)$/i.test(fileName),zipSignature=bytesHaveZipSignature(bytes);
+  if(!archiveName&&!zipSignature)return 'xlsx';
+  let archive;
+  try{archive=await JSZip.loadAsync(bytes,{checkCRC32:true});}
+  catch(e){if(archiveName||zipSignature)throw Error('ZIP-fail on vigane või ei ole loetav. Tööbaasi ei muudetud.');return 'xlsx';}
+  const manifestFile=archive.file('manifest.json');
+  if(manifestFile){
+    let manifest;try{manifest=JSON.parse(await manifestFile.async('string'));}catch(e){throw Error('DOLD-paketi manifest.json on vigane. Tööbaasi ei muudetud.');}
+    if(manifest?.format===WORK_PACKAGE_FORMAT)return 'work-package';
+    if(manifest?.format===SYNC_PACKAGE_FORMAT)return 'sync-package';
+    throw Error('ZIP-faili manifesti vormingut ei tunta. Tööbaasi ei muudetud.');
+  }
+  if(archive.file('xl/workbook.xml')&&archive.file('[Content_Types].xml'))return 'xlsx';
+  throw Error('ZIP-failist ei leitud DOLD-paketi manifesti ega XLSX töövihikut. Tööbaasi ei muudetud.');
+}
+async function handleImportFile(ev){
+  const file=ev.target.files?.[0];if(!file)return;
+  try{
+    const bytes=new Uint8Array(await file.arrayBuffer()),kind=await detectIncomingFileKind(bytes,file.name);
+    if(kind==='sync-package'){
+      if(typeof processSyncPackageBytes==='function')return processSyncPackageBytes(bytes,file.name,()=>{ev.target.value='';});
+      throw Error('Sünkroonimispaketi vastuvõtt pole saadaval.');
+    }
+    if(kind==='work-package'){
+      if(typeof importWorkPackage==='function')return importWorkPackage(ev,bytes);
+      throw Error('Tööpaketi vastuvõtt pole saadaval.');
+    }
+    return importXlsx(ev,bytes);
+  }catch(e){alert('Faili avamine ebaõnnestus. Telefoni töö jäi alles.\n'+(e.message||String(e)));ev.target.value='';}
+}
 async function bootstrapSavedWorkspace(){
   try{
     const listed=await storeCall('list');const list=Array.isArray(listed)?listed:[];
     let issues=[];if(nativeStore()&&typeof Android.listWorkspaceErrors==='function'){try{const raw=JSON.parse(Android.listWorkspaceErrors());if(raw.ok&&Array.isArray(raw.data))issues=raw.data;}catch(e){issues=[];}}
-    if(!list.length){TC.startupLoaded=false;TC.startupError=issues.length?'Telefonis olev tööfail on vigane. Vali töö jätkamiseks uuesti XLSX.':'';renderStartupWorkspace();return;}
+    if(!list.length){TC.startupLoaded=false;TC.startupError=issues.length?'Telefonis olev tööfail on vigane. Vali töö jätkamiseks uuesti XLSX.':'';renderStartupWorkspace();renderSyncStatus();return;}
     TC.startupWarning=issues.length?'Mõnda telefoni salvestatud tööfaili ei saanud avada; saad jätkata viimase terve koopiaga.':'';
     const latest=[...list].sort((a,b)=>(Date.parse(b.lastUsedAt||b.updatedAt||'')||Number(b.revision)||0)-(Date.parse(a.lastUsedAt||a.updatedAt||'')||Number(a.revision)||0))[0];
     const snap=await storeCall('get',latest.dbId);if(!snap||snap.schema!==1||!snap.workbookBase64)throw Error('Sisemine XLSX töövihik puudub või on vigane.');
@@ -259,11 +292,24 @@ async function appendSemanticOperations(beforeState){
   }
   return ops;
 }
+function validSyncOperationShape(op){
+  if(!op||op.schema!==1||typeof op.opId!=='string'||typeof op.deviceId!=='string'||!/^device-[a-f0-9]{32}$/.test(op.deviceId)
+    ||!Number.isSafeInteger(op.localSequence)||op.localSequence<1||op.opId!==`${op.deviceId}:${op.localSequence}`
+    ||typeof op.entityType!=='string'||typeof op.entityId!=='string'||!/^dtc-(kontroll|puudus|cabinet)-[A-Za-z0-9_-]{1,180}$/.test(op.entityId)
+    ||!op.changedFields||typeof op.changedFields!=='object'||Array.isArray(op.changedFields)||!Object.keys(op.changedFields).length)return false;
+  const prefix={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-',Cabinet:'dtc-cabinet-'}[op.entityType];if(!prefix||!op.entityId.startsWith(prefix))return false;
+  const actions={Kontroll:['ADD_KONTROLL','UPDATE_KONTROLL'],Puudus:['ADD_PUUDUS','UPDATE_PUUDUS','CLOSE_PUUDUS'],Cabinet:['UPDATE_CABINET_STATUS']};if(!actions[op.entityType].includes(op.action))return false;
+  const fields={Kontroll:['cabinetId','date','area','inspector','panel','device','location','start','end','duration','exception','cycleId','note',...CHECKS.map(([col])=>'score_'+col)],Puudus:['cabinetId','date','inspector','cabinetTitle','location','point','description','priority','repeat','owner','due','repairer','closedAt','repairAction','lastCheckedBy','cycleId','kontrollId'],Cabinet:['cabinetId','status']};
+  if(Object.keys(op.changedFields).some(field=>!fields[op.entityType].includes(field)))return false;
+  if(op.baseFieldVersions!=null&&(typeof op.baseFieldVersions!=='object'||Array.isArray(op.baseFieldVersions)))return false;
+  if(op.resolvesFieldVersions!=null&&(typeof op.resolvesFieldVersions!=='object'||Array.isArray(op.resolvesFieldVersions)))return false;
+  return true;
+}
 function planSyncOperation(op){
-  if(!TC.sync||op?.schema!==1||!op.opId||!op.entityId||!op.entityType)throw Error('Sünkroonimistoiming on vigane.');
+  if(!TC.sync||!validSyncOperationShape(op))throw Error('Sünkroonimistoiming on vigane.');
   if(op.dbId!==TC.dbId)throw Error('Need tööfailid ei kuulu samasse andmebaasi.');
   if(op.epoch!==TC.sync.epoch)throw Error('Sünkroonimispakett kuulub teise tööbaasi algseisu. Valmista teine telefon uuesti ette.');
-  if(!['Kontroll','Puudus','Cabinet'].includes(op.entityType)||!op.changedFields||typeof op.changedFields!=='object')throw Error('Sünkroonimistoimingu sisu ei ole toetatud.');
+  if(!['Kontroll','Puudus','Cabinet'].includes(op.entityType))throw Error('Sünkroonimistoimingu sisu ei ole toetatud.');
   if(TC.sync.appliedOps.includes(op.opId))return {duplicate:true,applyFields:{},sameFields:[],conflicts:[]};
   const entity=TC.sync.entities[op.entityType][op.entityId]||{values:{},fieldVersions:{},revision:0},applyFields={},sameFields=[],conflicts=[];
   for(const [field,remoteValue] of Object.entries(op.changedFields)){
@@ -317,9 +363,9 @@ function appendConflictResolutionOperation(conflict,choice){
   const op={schema:1,opId,deviceId:TC.deviceId,localSequence,createdAt:new Date().toISOString(),dbId:TC.dbId,epoch:TC.sync.epoch,entityType:conflict.entityType,entityId:conflict.entityId,action,baseRevision:Number(entity.revision)||0,baseFieldVersions:{[conflict.field]:conflict.opId},resolvesFieldVersions:{[conflict.field]:resolves},changedFields:{[conflict.field]:value}};
   entity.values[conflict.field]=value;entity.fieldVersions[conflict.field]=opId;entity.revision=(Number(entity.revision)||0)+1;TC.sync.journal.push(op);if(!TC.sync.appliedOps.includes(opId))TC.sync.appliedOps.push(opId);return op;
 }
-async function resolvePendingSyncConflicts(){
+async function resolvePendingSyncConflicts(preselected={}){
   const pending=(TC.sync?.conflicts||[]).filter(c=>!c.resolved),decisions=[];
-  for(const c of pending){const choice=await promptSyncConflict(c);if(!['local','remote'].includes(choice))throw Error('Vastuolu lahendamine katkestati. Telefoni senine töö jäi alles.');decisions.push({conflictId:c.conflictId,choice});}
+  for(const c of pending){const choice=preselected[c.conflictId]||await promptSyncConflict(c);if(!['local','remote'].includes(choice))throw Error('Vastuolu lahendamine katkestati. Telefoni senine töö jäi alles.');decisions.push({conflictId:c.conflictId,choice});}
   if(!decisions.length)return 0;
   const ok=await transaction(async()=>{
     for(const d of decisions){
@@ -396,7 +442,7 @@ async function applySyncOperationToWorkbook(op,plan){
   }
   throw Error('Sünkroonitud kirjeliik ei ole toetatud.');
 }
-async function applySyncOperations(operations,senderDeviceId=''){
+async function applySyncOperations(operations,senderDeviceId='',directConflictChoices=null){
   if(!Array.isArray(operations))throw Error('Sünkroonimispaketis puudub muudatuste loend.');
   const report={applied:0,duplicates:0,conflicts:0};
   const ok=await transaction(async()=>{
@@ -404,6 +450,21 @@ async function applySyncOperations(operations,senderDeviceId=''){
     for(const op of operations){
       const plan=planSyncOperation(op);if(plan.duplicate){report.duplicates++;continue;}
       await applySyncOperationToWorkbook(op,plan);commitSyncOperation(op,plan);report.applied++;report.conflicts+=plan.conflicts.length;
+    }
+    if(directConflictChoices){
+      for(const [conflictId,choice] of Object.entries(directConflictChoices)){
+        const conflict=TC.sync.conflicts.find(c=>c.conflictId===conflictId&&!c.resolved);if(!conflict)continue;
+        const entity=TC.sync.entities[conflict.entityType]?.[conflict.entityId];if(!entity)throw Error('Vastuolu kirje puudub. Sünkroonimist ei salvestatud.');
+        if(choice==='remote'){
+          entity.fieldVersions[conflict.field]=conflict.opId;
+          await applySyncOperationToWorkbook({entityType:conflict.entityType,entityId:conflict.entityId,action:'UPDATE_'+conflict.entityType.toUpperCase()}, {applyFields:{[conflict.field]:conflict.remoteValue}});
+          entity.values[conflict.field]=conflict.remoteValue;
+        }else if(choice==='local'){
+          entity.fieldVersions[conflict.field]=conflict.opId;entity.values[conflict.field]=conflict.localValue;
+        }else throw Error('Vastuolu otsus on vigane. Sünkroonimist ei salvestatud.');
+        appendConflictResolutionOperation(conflict,choice);
+        if(!resolveSyncConflictMetadata(conflictId,choice))throw Error('Vastuolu lahendust ei saanud kinnitada. Sünkroonimist ei salvestatud.');
+      }
     }
     if(senderDeviceId&&senderDeviceId!==TC.deviceId){
       const localIds=new Set(TC.sync.journal.filter(op=>op.deviceId===TC.deviceId).map(op=>op.opId)),acknowledged=operations.filter(op=>localIds.has(op.opId)).map(op=>op.opId);
@@ -475,13 +536,13 @@ async function mergeLocalIntoIncoming(local,incoming){
   }
   return merged;
 }
-async function importXlsx(ev){
+async function importXlsx(ev,sourceBytes=null){
   if(TC.startupTask)await TC.startupTask;
   const file=ev.target.files?.[0];if(!file||TC.busy)return;
   const old={zip:S.zip,fileName:S.fileName,tc:cloneData({...TC,opened:null,pending:null}),inspector:S.inspector,dirty:S.dirty};
   setBusy(true);stopInspectionTimer();
   try{
-    const bytes=new Uint8Array(await file.arrayBuffer());TC.cycle=null;TC.ready=false;await loadBook(bytes,file.name);
+    const bytes=sourceBytes?new Uint8Array(sourceBytes):new Uint8Array(await file.arrayBuffer());TC.cycle=null;TC.ready=false;await loadBook(bytes,file.name);
     const identity=await registryIdentity(),embedded=await readMetadata(),all=await storeCall('list');
     if(embedded?.cycle){TC.cycle=embedded.cycle;await refreshFromWorkbook();}
     const incomingSummary=captureWorkspaceSummary({updatedAt:embedded?.updatedAt,revision:embedded?.revision});
@@ -560,8 +621,10 @@ function localPendingSyncCount(){
   return (TC.sync?.journal||[]).filter(op=>op.deviceId===TC.deviceId&&!acknowledged.has(op.opId)).length;
 }
 function renderSyncStatus(){
-  const ready=!!(S.zip&&TC.dbId&&TC.sync),baseline=$('syncBaselineBtn'),send=$('syncSendBtn'),receive=$('syncReceiveBtn'),status=$('syncLocalStatus');
+  const ready=!!(S.zip&&TC.dbId&&TC.sync),baseline=$('syncBaselineBtn'),send=$('syncSendBtn'),receive=$('syncReceiveBtn'),status=$('syncLocalStatus'),showQr=$('lanShowQrBtn'),scanQr=$('lanScanQrBtn');
   if(baseline)baseline.disabled=!ready;if(send)send.disabled=!ready||!(TC.sync?.journal||[]).length;if(receive)receive.disabled=!ready;
+  const directAvailable=!!(window.Android&&typeof Android.startLanSyncSession==='function'&&typeof Android.startLanSyncClient==='function'&&typeof Android.createLanSyncQrPngBase64==='function'&&typeof Android.scanQr==='function');
+  if(showQr)showQr.disabled=!ready||!directAvailable;if(scanQr)scanQr.disabled=!directAvailable;
   if(status)status.textContent=ready?`Saatmata muudatusi selles telefonis: ${localPendingSyncCount()} • Lahendamata vastuolusid: ${(TC.sync.conflicts||[]).filter(c=>!c.resolved).length}`:'Ava esmalt XLSX tööfail.';
 }
 function continueCycle(){if(TC.busy)return;TC.ready=true;TC.pending=null;showTab('cab');}
@@ -635,6 +698,7 @@ async function ensurePresence(){
   return true;
 }
 function onNativeQrResult(raw){
+  if(S.qrMode==='directSync')return handleDirectSyncQr(raw);
   const id=normalizeQrId(raw);const proved=!!(id&&window.Android&&typeof Android.consumeQrProof==='function'&&Android.consumeQrProof(id));
   if(S.qrMode==='presence'){
     if(!TC.opened||id!==TC.opened.id||!proved){toast('Vale QR. Skaneeri '+(TC.opened?.id||'valitud kilbi')+' QR.',5000);renderPresence();return;}
@@ -750,7 +814,7 @@ async function createWorkPackageBytes(){
   const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle,checkedIds,sync:snapshot.sync||null,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,lastUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,workbookHash:snapshot.workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary,baseWorkbookSha256:baseBytes?await digest(baseBytes):null};
   const stateBytes=new TextEncoder().encode(JSON.stringify(state)),workbookHash=await digest(workbookBytes),stateHash=await digest(stateBytes),baseHash=baseBytes?await digest(baseBytes):null;
   const zip=new JSZip();zip.file('workbook.xlsx',workbookBytes);zip.file('state.json',stateBytes);if(baseBytes)zip.file('base-workbook.xlsx',baseBytes);
-  const manifest={format:'DOLD-TECHCONTROL-WORK-PACKAGE',version:1,createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',dbId:state.dbId,sha256:stateHash,size:stateBytes.length},baseWorkbook:baseBytes?{path:'base-workbook.xlsx',sha256:baseHash,size:baseBytes.length}:null,summary};
+  const manifest={format:WORK_PACKAGE_FORMAT,version:1,createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',dbId:state.dbId,sha256:stateHash,size:stateBytes.length},baseWorkbook:baseBytes?{path:'base-workbook.xlsx',sha256:baseHash,size:baseBytes.length}:null,summary};
   zip.file('manifest.json',JSON.stringify(manifest,null,2));return zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
 }
 async function shareWorkPackage(){
@@ -759,7 +823,6 @@ async function shareWorkPackage(){
   catch(e){if(e?.name!=='AbortError')alert('Töö üleandmine ebaõnnestus. Telefoni töö jäi alles.\n'+e.message);}finally{setBusy(false);}
 }
 const SYNC_PACKAGE_FORMAT='DOLD-TECHCONTROL-SYNC-PACKAGE';
-const SYNC_PACKAGE_MIME='application/zip';
 function syncOpsSummary(ops){
   const out={newControls:0,newDefects:0,repairedDefects:0,otherChanges:0,total:ops.length};
   for(const op of ops){if(op.action==='ADD_KONTROLL')out.newControls++;else if(op.action==='ADD_PUUDUS')out.newDefects++;else if(op.action==='CLOSE_PUUDUS')out.repairedDefects++;else out.otherChanges++;}
@@ -796,62 +859,386 @@ async function shareSyncDelta(){
   try{const bytes=await createSyncDeltaBytes(),name=syncPackageName('delta');await shareSyncBytes(bytes,name,'DOLD TechControl muudatuste sünkroonimine');toast('Muudatuste pakett on jagamiseks valmis',4500);renderSyncStatus();}
   catch(e){if(e?.name!=='AbortError')alert('Muudatuste saatmine ebaõnnestus. Telefoni töö jäi alles.\n'+e.message);}finally{setBusy(false);}
 }
+const DIRECT_SYNC_QR_PREFIX='DOLD-DIRECT-SYNC/1:';
+const DIRECT_SYNC_BOOTSTRAP_FORMAT='DOLD-TECHCONTROL-DIRECT-BOOTSTRAP';
+const DIRECT_SYNC_COMMIT_FORMAT='DOLD-TECHCONTROL-DIRECT-SYNC-COMMIT';
+const DIRECT_SYNC_MAX_BYTES=1024*1024;
+let directHostGeneration=0;
+function supportsR4DirectSync(){return !!(window.Android&&typeof Android.startLanSyncSessionDeferred==='function'&&typeof Android.respondLanSyncSession==='function');}
+function directPairingPayload(pairing){
+  const info={protocol:Number(pairing?.protocol),host:String(pairing?.host||''),port:Number(pairing?.port),sessionId:String(pairing?.sessionId||''),token:String(pairing?.token||''),createdAt:Number(pairing?.createdAt),expiresAt:Number(pairing?.expiresAt),lineage:String(pairing?.lineage||'')};
+  const payload=DIRECT_SYNC_QR_PREFIX+JSON.stringify(info);parseDirectSyncQr(payload);return payload;
+}
+function isPrivateIpv4Text(host){
+  const m=String(host||'').match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);if(!m)return false;
+  const a=m.slice(1).map(Number);if(a.some(n=>n<0||n>255))return false;
+  return a[0]===10||(a[0]===172&&a[1]>=16&&a[1]<=31)||(a[0]===192&&a[1]===168);
+}
+function parseDirectSyncQr(raw,now=Date.now()){
+  const text=String(raw||'').trim();if(!text.startsWith(DIRECT_SYNC_QR_PREFIX))throw Error('NOT_DOLD_SYNC_QR');
+  let p;try{p=JSON.parse(text.slice(DIRECT_SYNC_QR_PREFIX.length));}catch(e){throw Error('MALFORMED_QR');}
+  if(!p||p.protocol!==1||!isPrivateIpv4Text(p.host)||!Number.isInteger(p.port)||p.port<1||p.port>65535
+    ||typeof p.sessionId!=='string'||!/^[-_A-Za-z0-9]{22}$/.test(p.sessionId)
+    ||typeof p.token!=='string'||!/^[-_A-Za-z0-9]{43}$/.test(p.token)
+    ||!Number.isFinite(p.createdAt)||!Number.isFinite(p.expiresAt)
+    ||typeof p.lineage!=='string'||! /^[a-f0-9]{64}$/.test(p.lineage))throw Error('MALFORMED_QR');
+  if(p.createdAt>now+30000||p.expiresAt<=now||p.expiresAt<=p.createdAt||p.expiresAt-p.createdAt>300000)throw Error('QR_EXPIRED');
+  return {protocol:p.protocol,host:p.host,port:p.port,sessionId:p.sessionId,token:p.token,createdAt:p.createdAt,expiresAt:p.expiresAt,lineage:p.lineage};
+}
+function directSyncErrorText(code){
+  if(code==='QR_EXPIRED'||code==='SESSION_EXPIRED')return 'QR-kood on aegunud. Loo esimeses telefonis uus QR.';
+  if(code==='AUTH_FAILED')return 'Vale sünkroonimiskood.';
+  if(code==='LINEAGE_MISMATCH')return 'Telefonid ei kasuta sama tööbaasi.';
+  if(code==='NO_LOCAL_NETWORK')return 'Kohalik võrk pole saadaval. Mõlemad telefonid peavad olema samas Wi-Fi / LAN võrgus.';
+  if(code==='PAYLOAD_TOO_LARGE')return 'Tööbaasi pakett on kohaliku ühenduse jaoks liiga suur. Kasuta paketiga sünkroonimist.';
+  if(code==='INTEGRITY_FAILURE'||code==='MALFORMED_RESPONSE'||code==='MALFORMED_REQUEST')return 'Ühenduse andmed ei läbinud kontrolli. Telefoni töö jäi muutmata.';
+  if(code==='CANCELLED')return 'Ühendamine tühistati. Telefoni andmeid ei muudetud.';
+  if(code==='CONNECTION_FAILED'||code==='TRANSPORT_ERROR'||code==='INCOMPLETE_REQUEST'||code==='INCOMPLETE_RESPONSE')return 'Ühendus katkes. Andmeid ei muudetud.';
+  return 'Ühendust ei saanud luua. Kontrolli, et mõlemad telefonid oleksid samas Wi-Fi võrgus.';
+}
+function directBootstrapSummary(fileName,summary){
+  return `<b>Fail:</b> ${esc(fileName||'DOLD TechControl.xlsx')}<br><b>Objekte:</b> ${Number(summary?.objectCount)||0}<br><b>Aktiivses kontrollis:</b> ${Number(summary?.activeCount)||0}<br><b>Avatud puudusi:</b> ${Number(summary?.openDefects)||0}<br><b>Kontroll:</b> ${Number(summary?.checkedCount)||0} / ${Number(summary?.activeCount)||0}`;
+}
+function showDirectDialog(title,body,actions=[{value:'done',label:'VALMIS',primary:true}]){
+  return showAppChoice(title,body,actions);
+}
+function setDirectStatusScreen(title,body){
+  const box=$('appDialog');if(!box)return;
+  if(appDialogResolve)appDialogChoice('replace');
+  $('appDialogTitle').textContent=title;$('appDialogBody').innerHTML=body;$('appDialogActions').innerHTML='';box.classList.remove('hidden');
+}
+function closeDirectStatusScreen(){const box=$('appDialog');if(box)box.classList.add('hidden');}
+function startDirectSyncScanner(){
+  if(!window.Android||typeof Android.scanQr!=='function'){showDirectDialog('QR-skanner pole saadaval','Kasuta paketiga sünkroonimist.');return;}
+  S.qrMode='directSync';startQrScanner('directSync');
+}
+async function prepareDirectSyncSession(){
+  if(!S.zip||!TC.dbId||!TC.sync)throw Error('Ava enne QR-sünkroonimist tööfail.');
+  if(!window.Android||typeof Android.startLanSyncSession!=='function'||typeof Android.createLanSyncQrPngBase64!=='function')throw Error('Selles APK-s puudub otseühenduse tugi.');
+  const baseline=await createSyncBaselineBytes();if(baseline.length>DIRECT_SYNC_MAX_BYTES)return {status:'PAYLOAD_TOO_LARGE'};
+  const deferred=supportsR4DirectSync(),started=JSON.parse(deferred?Android.startLanSyncSessionDeferred(TC.dbId,bytesToBase64(baseline)):Android.startLanSyncSession(TC.dbId,bytesToBase64(baseline)));
+  if(!started.ok||started.status!=='STARTED')return {status:started.status||'ERROR',message:started.message||''};
+  try{
+    const payload=directPairingPayload(started.pairing),qrBase64=Android.createLanSyncQrPngBase64(payload,640);
+    if(!qrBase64)throw Error('QR-koodi loomine ebaõnnestus.');
+    const archive=await JSZip.loadAsync(baseline,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Baaspaketist puudub manifest.');
+    const manifest=JSON.parse(await mf.async('string'));
+    return {status:'STARTED',pairing:parseDirectSyncQr(payload),payload,qrBase64,manifest,baselineSize:baseline.length,baselineBase64:bytesToBase64(baseline),deferred};
+  }catch(e){try{Android.stopLanSyncSession();}catch(ignore){}throw e;}
+}
+function cancelDirectSyncHost(){
+  directHostGeneration++;try{if(window.Android&&typeof Android.stopLanSyncSession==='function')Android.stopLanSyncSession();}catch(e){}
+  appDialogChoice('cancel');
+}
+function showDirectHostWaitDialog(session){
+  $('appDialogTitle').textContent='TELEFONIDE SÜNKROONIMINE';
+  $('appDialogBody').innerHTML=`<div class="syncQrWait"><div class="big">Ootan teist telefoni...</div><img class="syncQrImage" alt="Ajutine DOLD sünkroonimise QR-kood" src="data:image/png;base64,${session.qrBase64}"><div class="small">Sessioon aegub: <b id="directQrCountdown"></b></div><div class="small">Näita koodi teise telefoni DOLD TechControli kaamerale.</div></div>`;
+  $('appDialogActions').innerHTML='<button onclick="cancelDirectSyncHost()">TÜHISTA</button>';$('appDialog').classList.remove('hidden');
+  return new Promise(resolve=>{appDialogResolve=resolve;});
+}
+function updateDirectHostCountdown(expiresAt){
+  const left=Math.max(0,Math.ceil((expiresAt-Date.now())/1000)),el=$('directQrCountdown');if(el)el.textContent=String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');
+}
+async function pollDirectHostSession(session,generation){
+  while(generation===directHostGeneration){
+    let info;try{info=JSON.parse(Android.getLanSyncSessionStatus());}catch(e){return {status:'ERROR'};}
+    if(info.status==='COMPLETED'||info.status==='EXPIRED'||info.status==='CANCELLED'||info.status==='ERROR'||info.status==='STOPPED')return info;
+    updateDirectHostCountdown(session.pairing.expiresAt);
+    if(Date.now()>=session.pairing.expiresAt)return {status:'EXPIRED'};
+    await new Promise(resolve=>setTimeout(resolve,700));
+  }
+  return {status:'CANCELLED'};
+}
+async function pollDirectHostEvent(session,generation){
+  while(generation===directHostGeneration){
+    let info;try{info=JSON.parse(Android.getLanSyncSessionStatus());}catch(e){return {status:'ERROR'};}
+    if(['REQUEST_RECEIVED','ACK_RECEIVED','COMPLETED','EXPIRED','CANCELLED','ERROR','STOPPED'].includes(info.status))return info;
+    updateDirectHostCountdown(session.pairing.expiresAt);
+    if(Date.now()>=session.pairing.expiresAt)return {status:'EXPIRED'};
+    await new Promise(resolve=>setTimeout(resolve,300));
+  }
+  return {status:'CANCELLED'};
+}
+function hostRequestIsBootstrap(status,session){
+  try{const request=JSON.parse(new TextDecoder().decode(decode64(status.requestBase64||'')));return request.format===DIRECT_SYNC_BOOTSTRAP_FORMAT&&request.version===1&&request.action==='REQUEST_BASELINE'&&request.lineage===session.pairing.lineage;}
+  catch(e){return false;}
+}
+function directControlMessage(value){return bytesToBase64(new TextEncoder().encode(JSON.stringify(value)));}
+function directControlFromBase64(value){try{return JSON.parse(new TextDecoder().decode(decode64(value||'')));}catch(e){return null;}}
+async function respondDirectHost(session,payload,terminal){
+  if(!session.deferred||!window.Android||typeof Android.respondLanSyncSession!=='function')return false;
+  const bytes=payload instanceof Uint8Array?payload:new TextEncoder().encode(String(payload||''));if(bytes.length>DIRECT_SYNC_MAX_BYTES)return false;
+  return !!Android.respondLanSyncSession(bytesToBase64(bytes),!!terminal);
+}
+async function runDirectSyncHostR4(session,generation){
+  let prepared=null,hostDelta=null,hostDeltaHash='',peerDeviceId='';
+  while(generation===directHostGeneration){
+    const event=await pollDirectHostEvent(session,generation);if(event.status==='CANCELLED')return {status:'CANCELLED'};
+    if(event.status==='EXPIRED')return {status:'EXPIRED'};
+    if(event.status==='ERROR'||event.status==='STOPPED')return event;
+    if(event.status==='COMPLETED')return {status:'COMPLETED',prepared,hostDeltaHash};
+    const payload=decode64(event.requestBase64||'');
+    if(event.status==='REQUEST_RECEIVED'){
+      if(hostRequestIsBootstrap(event,session)){
+        if(!await respondDirectHost(session,decode64(session.baselineBase64),true))return {status:'ERROR'};
+        const completed=await pollDirectHostEvent(session,generation);return {status:completed.status,bootstrap:true};
+      }
+      try{
+        prepared=await processSyncPackageBytes(payload,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directPrepareOnly:true,directRole:'TELEFON B → TELEFON A'});
+        if(!prepared?.accepted){const reject=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_REJECTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason:'USER_CANCELLED'});await respondDirectHost(session,decode64(reject),true);return {status:'CANCELLED'};}
+        peerDeviceId=prepared.manifest.senderDeviceId||'';
+        if(!peerDeviceId||peerDeviceId===TC.deviceId)throw Error('SAME_DEVICE');
+        hostDelta=await createSyncDeltaBytes();if(hostDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');hostDeltaHash=await digest(hostDelta);
+        renderDirectHostWaitScreen(session,'Teise telefoniga saadetud kontrollid ja parandused kinnituse järel salvestatakse.');
+        if(!await respondDirectHost(session,hostDelta,false))throw Error('CONNECTION_FAILED');
+      }catch(e){
+        const reason=e.message||'SYNC_REJECTED',reject=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_REJECTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason});
+        await respondDirectHost(session,decode64(reject),true);return {status:'ERROR',error:reason};
+      }
+      continue;
+    }
+    if(event.status==='ACK_RECEIVED'){
+      const control=directControlFromBase64(event.requestBase64);
+      if(control?.format===DIRECT_SYNC_COMMIT_FORMAT&&control.version===1&&control.phase==='CLIENT_ABORT'
+        &&control.sessionId===session.pairing.sessionId&&control.dbId===TC.dbId&&control.epoch===TC.sync.epoch){
+        const aborted=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_ABORTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch});
+        await respondDirectHost(session,decode64(aborted),true);return {status:'CANCELLED'};
+      }
+      try{
+        if(!prepared||!peerDeviceId)throw Error('SYNC_PROTOCOL_INVALID');
+        const finalResult=await processSyncPackageBytes(payload,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directApplyConfirmed:true,directRole:'TELEFON B → TELEFON A'});
+        if(!finalResult?.accepted)throw Error('SYNC_REJECTED');
+        if(finalResult.manifest.senderDeviceId!==peerDeviceId)throw Error('SYNC_PEER_CHANGED');
+        const ack=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_COMMITTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:TC.deviceId,clientDeviceId:peerDeviceId,hostDeltaHash,clientDeltaHash:await digest(payload),hostApplied:finalResult.report?.applied||0,hostDuplicates:finalResult.report?.duplicates||0,completedAt:new Date().toISOString()});
+        if(!await respondDirectHost(session,decode64(ack),true))throw Error('CONNECTION_FAILED');
+        const completed=await pollDirectHostEvent(session,generation);if(completed.status!=='COMPLETED')return completed;
+        return {status:'COMPLETED',prepared,hostDeltaHash,finalResult};
+      }catch(e){
+        const failed=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_UNCONFIRMED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason:e.message||'SYNC_FAILED'});
+        await respondDirectHost(session,decode64(failed),true);return {status:'ERROR',error:e.message||'SYNC_FAILED',prepared};
+      }
+    }
+  }
+  return {status:'CANCELLED'};
+}
+function renderDirectHostWaitScreen(session,message='Ootan teist telefoni...'){
+  $('appDialogTitle').textContent='TELEFONIDE SÜNKROONIMINE';
+  $('appDialogBody').innerHTML=`<div class="syncQrWait"><div class="big">${esc(message)}</div><img class="syncQrImage" alt="Ajutine DOLD sünkroonimise QR-kood" src="data:image/png;base64,${session.qrBase64}"><div class="small">Sessioon aegub: <b id="directQrCountdown"></b></div><div class="small">Näita koodi teise telefoni DOLD TechControli kaamerale.</div></div>`;
+  $('appDialogActions').innerHTML='<button onclick="cancelDirectSyncHost()">TÜHISTA</button>';$('appDialog').classList.remove('hidden');updateDirectHostCountdown(session.pairing.expiresAt);
+}
+async function showDirectSyncQr(){
+  if(TC.busy)return;if(!S.zip){await showDirectDialog('Aktiivne tööfail puudub','Ava kõigepealt DOLD TechControli XLSX tööfail.');return;}
+  let session;setBusy(true);
+  try{session=await prepareDirectSyncSession();}
+  catch(e){setBusy(false);await showDirectDialog('QR-sünkroonimist ei saanud alustada',esc(e.message||String(e)));return;}
+  finally{if(TC.busy)setBusy(false);}
+  if(session.status!=='STARTED'){
+    const noNetwork=session.status==='NO_LOCAL_NETWORK'||session.status==='BIND_FAILED';
+    const message=noNetwork?'Kohalik võrk pole saadaval. Mõlemad telefonid peavad olema samas Wi-Fi / LAN võrgus.':session.status==='PAYLOAD_TOO_LARGE'?directSyncErrorText('PAYLOAD_TOO_LARGE'):'Ajutist ühendust ei saanud avada.';
+    const actions=noNetwork||session.status==='PAYLOAD_TOO_LARGE'?[{value:'package',label:'KASUTA PAKETIGA SÜNKROONIMIST',primary:true},{value:'cancel',label:'TÜHISTA'}]:[{value:'done',label:'VALMIS',primary:true}];
+    const choice=await showDirectDialog(noNetwork?'Kohalik võrk pole saadaval':'QR-sünkroonimist ei saanud alustada',esc(message),actions);if(choice==='package')await shareSyncBaseline();return;
+  }
+  if(session.deferred){
+    const generation=++directHostGeneration;renderDirectHostWaitScreen(session);const result=await runDirectSyncHostR4(session,generation);closeDirectStatusScreen();
+    if(result.bootstrap&&result.status==='COMPLETED')await showDirectDialog('ÜHENDATUD',`Baaspakett saadeti teise telefoni.<div class="topgap">Telefonis <b>${esc(session.manifest.fileName||'DOLD TechControl.xlsx')}</b> oodatakse enne salvestamist kasutaja kinnitust.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
+    else if(result.status==='COMPLETED')await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(result.prepared?.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
+    else if(result.status==='EXPIRED')await showDirectDialog('SESSIOON AEGUS','QR-kood on aegunud. Loo uus QR.');
+    else if(result.status==='ERROR')await showDirectDialog('SÜNKROONIMISE TULEMUST EI SAANUD KINNITADA','Ühenda telefonid uuesti. Telefoni kohalik töö jäi alles.');
+    return;
+  }
+  const generation=++directHostGeneration,dialog=showDirectHostWaitDialog(session),monitor=pollDirectHostSession(session,generation);
+  const result=await Promise.race([dialog.then(choice=>({choice})),monitor.then(status=>({status}))]);
+  if(result.choice==='cancel')return;
+  if(result.status){appDialogChoice('finished');
+    if(result.status.status==='COMPLETED'&&hostRequestIsBootstrap(result.status,session)){
+      await showDirectDialog('ÜHENDATUD',`Baaspakett saadeti teise telefoni.<div class="topgap">Telefonis <b>${esc(session.manifest.fileName||'DOLD TechControl.xlsx')}</b> oodatakse enne salvestamist kasutaja kinnitust.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
+    }else if(result.status.status==='EXPIRED'){
+      const choice=await showDirectDialog('SESSIOON AEGUS','QR-kood on aegunud. Loo uus QR.',[{value:'retry',label:'LOO UUS QR',primary:true},{value:'done',label:'VALMIS'}]);if(choice==='retry')showDirectSyncQr();
+    }else if(result.status.status!=='CANCELLED'){
+      const choice=await showDirectDialog('ÜHENDUS KATKES','Andmeid ei muudetud. Kontrolli Wi-Fi ühendust ja proovi uuesti.',[{value:'retry',label:'LOO UUS QR',primary:true},{value:'done',label:'VALMIS'}]);if(choice==='retry')showDirectSyncQr();
+    }
+  }
+}
+async function findExistingDirectDatabase(){
+  await TC.startupTask;
+  if(TC.dbId)return {dbId:TC.dbId,fileName:S.fileName||TC.startupSnapshot?.fileName||''};
+  const saved=await storeCall('list');if(!Array.isArray(saved)||!saved.length)return null;
+  const latest=[...saved].sort((a,b)=>(Date.parse(b.lastUsedAt||b.updatedAt||'')||0)-(Date.parse(a.lastUsedAt||a.updatedAt||'')||0))[0];
+  return latest?.dbId?{dbId:latest.dbId,fileName:latest.fileName||''}:null;
+}
+async function validateDirectBaselineBytes(bytes,pairing){
+  if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);if(!bytes.length||bytes.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');
+  const archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('PACKAGE_INVALID');
+  const manifest=JSON.parse(await mf.async('string'));
+  if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==1||manifest.mode!=='baseline'||!manifest.dbId||!manifest.epoch)throw Error('PACKAGE_INVALID');
+  if(await digest(new TextEncoder().encode(String(manifest.dbId)))!==pairing.lineage)throw Error('LINEAGE_MISMATCH');
+  const stateFile=archive.file(manifest.state?.path||'state.json'),workbookFile=archive.file(manifest.workbook?.path||'workbook.xlsx');
+  if(!stateFile||!workbookFile||!Number.isFinite(Number(manifest.state?.size))||!Number.isFinite(Number(manifest.workbook?.size))||Number(manifest.state.size)>DIRECT_SYNC_MAX_BYTES||Number(manifest.workbook.size)>DIRECT_SYNC_MAX_BYTES)throw Error('PACKAGE_INVALID');
+  const stateBytes=await stateFile.async('uint8array'),workbookBytes=await workbookFile.async('uint8array');
+  if(stateBytes.length!==manifest.state.size||workbookBytes.length!==manifest.workbook.size||await digest(stateBytes)!==manifest.state.sha256||await digest(workbookBytes)!==manifest.workbook.sha256)throw Error('INTEGRITY_FAILURE');
+  return {manifest,archive};
+}
+async function waitDirectClientJob(jobId,expiresAt){
+  while(Date.now()<=expiresAt+15000){
+    let result;try{result=JSON.parse(Android.getLanSyncClientResult(jobId));}catch(e){throw Error('CONNECTION_FAILED');}
+    if(result.status==='DONE')return result;
+    await new Promise(resolve=>setTimeout(resolve,250));
+  }
+  throw Error('TIMEOUT');
+}
+async function directClientExchange(pairing,expectedDbId,payload){
+  let start;try{start=JSON.parse(Android.startLanSyncClient(JSON.stringify(pairing),expectedDbId||'',bytesToBase64(payload)));}catch(e){throw Error('CONNECTION_FAILED');}
+  if(!start.ok||!start.jobId)throw Error(start.status||'CONNECTION_FAILED');
+  const result=await waitDirectClientJob(start.jobId,pairing.expiresAt);if(result.result!=='SUCCESS')throw Error(result.result||'CONNECTION_FAILED');
+  return decode64(result.responseBase64||'');
+}
+function validateDirectSyncCommitAck(bytes,pairing,expected){
+  const message=directControlFromBase64(bytesToBase64(bytes));
+  if(!message||message.format!==DIRECT_SYNC_COMMIT_FORMAT||message.version!==1)throw Error('COMMIT_UNCONFIRMED');
+  if(message.phase==='SYNC_REJECTED')throw Error(message.reason||'SYNC_REJECTED');
+  if(message.phase==='SYNC_ABORTED')throw Error('SYNC_ABORTED');
+  if(message.phase!=='SYNC_COMMITTED'||message.sessionId!==pairing.sessionId||message.dbId!==expected.dbId||message.epoch!==expected.epoch
+    ||message.hostDeviceId!==expected.hostDeviceId||message.clientDeviceId!==expected.clientDeviceId
+    ||message.hostDeltaHash!==expected.hostDeltaHash||message.clientDeltaHash!==expected.clientDeltaHash)throw Error('COMMIT_UNCONFIRMED');
+  return message;
+}
+async function handleDirectSyncQr(raw){
+  let localR4Committed=false;
+  let pairing;try{pairing=parseDirectSyncQr(raw);}catch(e){if(S.qrMode==='directSync')S.qrMode='audit';const msg=e.message==='QR_EXPIRED'?directSyncErrorText('QR_EXPIRED'):e.message==='NOT_DOLD_SYNC_QR'?'See ei ole DOLD sünkroonimise QR-kood.':'DOLD sünkroonimise QR-kood on vigane.';await showDirectDialog('QR-KOODI EI SAA KASUTADA',msg);return false;}
+  try{
+    const local=await findExistingDirectDatabase();
+    if(local){const localLineage=await digest(new TextEncoder().encode(String(local.dbId||'')));
+      if(localLineage!==pairing.lineage){await showDirectDialog('TEINE TÖÖBAAS','Telefonides on erinevad DOLD tööbaasid. Andmeid ei muudetud.');return false;}
+      if(!supportsR4DirectSync()){await showDirectDialog('TELEFON ON JUBA SEADISTATUD','Sama tööbaas on selles telefonis olemas. Kasuta paketiga sünkroonimist.');return false;}
+      if(!S.zip||!TC.dbId||!TC.sync||TC.dbId!==local.dbId)throw Error('Ava esmalt selles telefonis sama aktiivne tööfail.');
+      if(!window.Android||typeof Android.startLanSyncClient!=='function'||typeof Android.getLanSyncClientResult!=='function')throw Error('CONNECTION_FAILED');
+      setDirectStatusScreen('ÜHENDAMINE...','Vahetan mõlema telefoni muudatused. Ühtegi muudatust ei rakendata enne kokkuvõtte ja kinnituse kuvamist.');
+      let firstDelta;setBusy(true);try{firstDelta=await createSyncDeltaBytes();}finally{setBusy(false);}
+      if(firstDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');
+      const hostBytes=await directClientExchange(pairing,TC.dbId,firstDelta),hostDeltaHash=await digest(hostBytes);
+      const hostControl=directControlFromBase64(bytesToBase64(hostBytes));
+      if(hostControl?.format===DIRECT_SYNC_COMMIT_FORMAT&&hostControl.phase==='SYNC_REJECTED')throw Error(hostControl.reason||'SYNC_REJECTED');
+      if(hostControl?.format===DIRECT_SYNC_COMMIT_FORMAT)throw Error(hostControl.reason||'SYNC_REJECTED');
+      closeDirectStatusScreen();
+      const received=await processSyncPackageBytes(hostBytes,'DOLD_TELEFON_A_SÜNKROON.dtcs',null,{directProtocol:true,directRole:'TELEFON A → TELEFON B'});
+      if(!received?.accepted){
+        setBusy(true);const abort=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'CLIENT_ABORT',sessionId:pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,deviceId:TC.deviceId});
+        try{await directClientExchange(pairing,TC.dbId,decode64(abort));}catch(e){}finally{setBusy(false);}
+        return false;
+      }
+      localR4Committed=true;
+      setDirectStatusScreen('SÜNKROONIMINE...','Sinu muudatused salvestati. Kinnitan teise telefoni salvestuse.');setBusy(true);
+      const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
+      const ackBytes=await directClientExchange(pairing,TC.dbId,clientFinalDelta);setBusy(false);closeDirectStatusScreen();
+      const ack=validateDirectSyncCommitAck(ackBytes,pairing,{dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:received.manifest.senderDeviceId,clientDeviceId:TC.deviceId,hostDeltaHash,clientDeltaHash});
+      await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(received.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);renderSyncStatus();return !!ack;
+    }
+    if(!window.Android||typeof Android.startLanSyncClient!=='function'||typeof Android.getLanSyncClientResult!=='function')throw Error('CONNECTION_FAILED');
+    let localDeviceId=installationDeviceId();TC.deviceId=localDeviceId;
+    const request=bytesToBase64(new TextEncoder().encode(JSON.stringify({format:DIRECT_SYNC_BOOTSTRAP_FORMAT,version:1,action:'REQUEST_BASELINE',lineage:pairing.lineage})));
+    setDirectStatusScreen('ÜHENDAMINE...','Ootan teise telefoni vastust. Tööbaas laaditakse alles pärast kontrolli ja kinnitust.');setBusy(true);
+    let start;try{start=JSON.parse(Android.startLanSyncClient(JSON.stringify(pairing),'',request));}catch(e){throw Error('CONNECTION_FAILED');}
+    if(!start.ok||!start.jobId)throw Error(start.status||'CONNECTION_FAILED');
+    const result=await waitDirectClientJob(start.jobId,pairing.expiresAt);
+    if(result.result!=='SUCCESS')throw Error(result.result||'CONNECTION_FAILED');
+    const bytes=decode64(result.responseBase64||''),checked=await validateDirectBaselineBytes(bytes,pairing);
+    if(checked.manifest.senderDeviceId===localDeviceId){localDeviceId='device-'+uid();try{localStorage.setItem('dold_techcontrol_device_id_v1',localDeviceId);}catch(e){}TC.deviceId=localDeviceId;}
+    closeDirectStatusScreen();setBusy(false);
+    await processSyncPackageBytes(bytes,checked.manifest.fileName||'DOLD_Teise_telefoni_baas.dtcs',null,{directBootstrap:true,expectedLineage:pairing.lineage,localDeviceId});
+    if(TC.dbId===checked.manifest.dbId)TC.deviceId=localDeviceId;
+    return TC.dbId===checked.manifest.dbId;
+  }catch(e){closeDirectStatusScreen();if(TC.busy)setBusy(false);const code=e.message||'CONNECTION_FAILED';
+    const msg=localR4Committed?'Sünkroonimise tulemust ei saanud kinnitada. Ühenda telefonid uuesti; telefoni salvestatud töö jäi alles.':code==='PACKAGE_INVALID'?'Saadud tööbaasipakett on vigane. Telefoni andmeid ei muudetud.':code==='COMMIT_UNCONFIRMED'?'Sünkroonimise tulemust ei saanud kinnitada. Ühenda telefonid uuesti; salvestatud töö jääb alles.':code==='SYNC_REJECTED'||code==='USER_CANCELLED'?'Teine telefon ei kinnitanud sünkroonimist. Kohalikku tööbaasi ei asendatud.':code==='SYNC_ABORTED'?'Sünkroonimine tühistati. Telefoni senine töö jäi alles.':directSyncErrorText(code);
+    await showDirectDialog('OTSEÜHENDUS EBAÕNNESTUS',msg);return false;
+  }finally{if(S.qrMode==='directSync')S.qrMode='audit';}
+}
 function receiveSyncPackage(){selectNewWorkbook();}
 function previewSyncOperations(operations){
-  const saved=TC.sync,counts={newControls:0,newDefects:0,repairedDefects:0,otherChanges:0,newOperations:0,duplicates:0,conflicts:0};
+  const saved=TC.sync,counts={newControls:0,newDefects:0,repairedDefects:0,updatedDefects:0,cabinetStatusChanges:0,otherChanges:0,newOperations:0,duplicates:0,conflicts:0,conflictItems:[]};
   TC.sync=cloneData(saved);
-  try{for(const op of operations){const plan=planSyncOperation(op);if(plan.duplicate){counts.duplicates++;continue;}counts.newOperations++;counts.conflicts+=plan.conflicts.length;if(op.action==='ADD_KONTROLL')counts.newControls++;else if(op.action==='ADD_PUUDUS')counts.newDefects++;else if(op.action==='CLOSE_PUUDUS')counts.repairedDefects++;else counts.otherChanges++;commitSyncOperation(op,plan);}}
+  const priorConflictIds=new Set(saved.conflicts.map(c=>c.conflictId));
+  try{for(const op of operations){const plan=planSyncOperation(op);if(plan.duplicate){counts.duplicates++;continue;}counts.newOperations++;if(op.action==='ADD_KONTROLL')counts.newControls++;else if(op.action==='ADD_PUUDUS')counts.newDefects++;else if(op.action==='CLOSE_PUUDUS')counts.repairedDefects++;else if(op.entityType==='Puudus')counts.updatedDefects++;else if(op.entityType==='Cabinet')counts.cabinetStatusChanges++;else counts.otherChanges++;commitSyncOperation(op,plan);}
+    counts.conflictItems=TC.sync.conflicts.filter(c=>!c.resolved&&!priorConflictIds.has(c.conflictId));counts.conflicts=counts.conflictItems.length;
+  }
   finally{TC.sync=saved;}
   return counts;
 }
-async function importSyncBaseline(archive,manifest,file){
+function directSyncSummaryHtml(s){return `+ ${Number(s.newControls)||0} kontrolli<br>+ ${Number(s.newDefects)||0} uut puudust<br>${Number(s.repairedDefects)||0} parandust<br>${Number(s.updatedDefects)||0} uuendatud puudust<br>${Number(s.cabinetStatusChanges)||0} kilbi staatuse muudatust<br>${Number(s.otherChanges)||0} muud muudatust`;}
+function directSyncPreviewBody(direction,summary,preview){return `<b>${esc(direction)}</b><div class="topgap">${directSyncSummaryHtml(summary)}</div><div class="topgap"><b>Selles telefonis:</b><br>${localPendingSyncCount()} saatmata muudatust</div><div class="topgap"><b>Uusi / uuendatud toiminguid:</b> ${preview.newOperations}<br><b>Vastuolusid:</b> ${preview.conflicts}<br><b>Juba olemas:</b> ${preview.duplicates}</div>`;}
+async function importSyncBaseline(archive,manifest,file,options={}){
   if(TC.dbId&&S.zip)throw Error('See telefon on juba tööfailiga ette valmistatud. Jätka selle tööga või kasuta tavapärast töö üleandmist.');
   const stateFile=archive.file(manifest.state?.path||'state.json'),workbookFile=archive.file(manifest.workbook?.path||'workbook.xlsx');if(!stateFile||!workbookFile)throw Error('Baaspaketist puudub töövihik või oleku fail.');
   const stateBytes=await stateFile.async('uint8array'),workbookBytes=await workbookFile.async('uint8array');
   if(stateBytes.length!==manifest.state.size||await digest(stateBytes)!==manifest.state.sha256)throw Error('Baaspaketi oleku kontrollsumma ei klapi.');
   if(workbookBytes.length!==manifest.workbook.size||await digest(workbookBytes)!==manifest.workbook.sha256)throw Error('Baaspaketi XLSX kontrollsumma ei klapi.');
   const state=JSON.parse(new TextDecoder().decode(stateBytes));if(state.schema!==1||!state.dbId||state.dbId!==manifest.dbId||!state.sync||state.sync.schema!==1||state.sync.dbId!==state.dbId||state.sync.epoch!==manifest.epoch)throw Error('Baaspaketi andmebaasi tunnus või sünkroonimise algseis ei klapi.');
+  if(options.directBootstrap){
+    const incomingLineage=await digest(new TextEncoder().encode(String(manifest.dbId)));
+    if(incomingLineage!==options.expectedLineage)throw Error('Telefonid ei kasuta sama tööbaasi.');
+    if(!options.localDeviceId||options.localDeviceId===manifest.senderDeviceId)throw Error('Telefoni seadme tunnus peab lähtetelefonist erinema.');
+  }
   if(state.workbookHash!==manifest.workbook.sha256)throw Error('Baaspaketi olek viitab teisele XLSX töövihikule.');
   const cycleIds=Object.keys(state.cycle?.entries||{}).sort(),checkedIds=(state.checkedIds||cycleIds).slice().sort();if(cycleIds.length!==checkedIds.length||cycleIds.some((id,i)=>id!==checkedIds[i]))throw Error('Baaspaketi kontrolli edenemise ID-d ei klapi.');
   const incomingSummary=await summarizeWorkbookBytes(workbookBytes,state.fileName||manifest.fileName||file.name,state.cycle,{updatedAt:state.updatedAt,revision:state.revision});
   for(const key of ['controlCount','defectCount','openDefects','activeCount','checkedCount'])if(Number(incomingSummary[key])!==Number(state.summary?.[key]))throw Error('Baaspaketi kokkuvõte ei klapi töövihikuga ('+key+').');
-  const choice=await showAppChoice('VALMISTA TEINE TELEFON',`Seade saab sama dbId ja sünkroonimise algseisu. Selle telefoni deviceId jääb eraldi.<div class="topgap">${summaryBlock('SAABUV BAAS',incomingSummary)}</div><p class="topgap">Pärast seda saab mõlemas telefonis paralleelselt töötada ja muudatusi vahetada.</p>`,[{value:'initialize',label:'VALMISTA ETTE',primary:true},{value:'cancel',label:'TÜHISTA'}]);
+  const preview=options.directBootstrap
+    ?`${directBootstrapSummary(state.fileName||manifest.fileName||file.name,incomingSummary)}<p class="topgap"><b>Kontrolli ajalugu ja avatud puudused kopeeritakse samuti.</b></p><p class="topgap">Telefon saab sama tööbaasi ja sünkroonimise algseisu. Seadme tunnus jääb sellele telefonile eraldi.</p>`
+    :`Seade saab sama dbId ja sünkroonimise algseisu. Selle telefoni deviceId jääb eraldi.<div class="topgap">${summaryBlock('SAABUV BAAS',incomingSummary)}</div><p class="topgap">Pärast seda saab mõlemas telefonis paralleelselt töötada ja muudatusi vahetada.</p>`;
+  const choice=await showAppChoice(options.directBootstrap?'UUS TELEFON':'VALMISTA TEINE TELEFON',preview,[{value:'initialize',label:options.directBootstrap?'VALMISTA SEE TELEFON ETTE':'VALMISTA ETTE',primary:true},{value:'cancel',label:'TÜHISTA'}]);
   if(choice!=='initialize')return;
   const snapshot={schema:1,dbId:state.dbId,fileName:state.fileName||manifest.fileName||file.name,registryKey:state.registryKey||'',registryTokens:state.registryTokens||[],cycle:state.cycle||null,sync:state.sync,guard:{remaining:randomGap(),pending:null},revision:Number(state.revision)||0,updatedAt:state.updatedAt||manifest.createdAt,lastUsedAt:new Date().toISOString(),sourceHash:state.sourceHash||manifest.workbook.sha256,baseWorkbookBase64:bytesToBase64(workbookBytes),inspector:state.inspector||'',dirty:!!state.dirty,workbookHash:manifest.workbook.sha256,summary:incomingSummary,workbookBase64:bytesToBase64(workbookBytes)};
   await storeCall('put',snapshot);Object.assign(TC,{dbId:snapshot.dbId,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,localUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,baseWorkbookBase64:snapshot.baseWorkbookBase64,ready:false,opened:null,pending:{notice:'Teise telefoni baastöö vastu võetud.'}});
   S.inspector=snapshot.inspector;S.dirty=snapshot.dirty;S.stagedDefects=[];await loadBook(workbookBytes,snapshot.fileName);TC.startupLoaded=true;TC.startupSnapshot=snapshot;TC.startupError='';TC.startupWarning='';TC.activated=true;
-  $('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();await persistWorkspace();renderStartupWorkspace();renderCyclePanel();showTab('home');toast('Telefon on paralleelseks tööks ette valmistatud',4500);
+  $('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();if(!options.directBootstrap)await persistWorkspace();renderStartupWorkspace();renderCyclePanel();showTab('home');
+  if(options.directBootstrap)await showAppChoice('TELEFON ON VALMIS',`${directBootstrapSummary(snapshot.fileName,incomingSummary)}<p class="topgap">Sama tööbaas on salvestatud. Sellel telefonil on eraldi seadme tunnus.</p>`,[{value:'done',label:'VALMIS',primary:true}]);else toast('Telefon on paralleelseks tööks ette valmistatud',4500);
 }
-async function importSyncPackage(ev){
-  if(TC.startupTask)await TC.startupTask;const file=ev.target.files?.[0];if(!file||TC.busy)return;setBusy(true);
+// File Share and future transports pass package bytes through this single semantic sync path.
+async function processSyncPackageBytes(sourceBytes,fileName='sync.dtcs',clearInput=null,options={}){
+  const file={name:fileName};let markedBusy=false;
   try{
-    const bytes=new Uint8Array(await file.arrayBuffer()),archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Sünkroonimispaketist puudub manifest.');
+    if(TC.startupTask)await TC.startupTask;if(!sourceBytes||TC.busy)return;setBusy(true);markedBusy=true;
+    const bytes=new Uint8Array(sourceBytes),archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Sünkroonimispaketist puudub manifest.');
     const manifest=JSON.parse(await mf.async('string'));if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==1||!['baseline','delta'].includes(manifest.mode))throw Error('Seda sünkroonimispaketi versiooni ei toetata.');
-    if(manifest.mode==='baseline'){await importSyncBaseline(archive,manifest,file);return;}
+    if(manifest.mode==='baseline'){await importSyncBaseline(archive,manifest,file,options);return;}
     if(!TC.dbId||!TC.sync||!S.zip)throw Error('Ava esmalt sama andmebaasi tööfail või valmista telefon baaspaketiga ette.');
     if(manifest.dbId!==TC.dbId)throw Error('Need tööfailid ei kuulu samasse andmebaasi.');
     if(manifest.epoch!==TC.sync.epoch)throw Error('Sünkroonimispakett kuulub teise tööbaasi algseisu. Valmista teine telefon uuesti ette.');
     const opFile=archive.file(manifest.operations?.path||'operations.json');if(!opFile)throw Error('Sünkroonimispaketist puuduvad muudatused.');
     const opBytes=await opFile.async('uint8array');if(opBytes.length!==manifest.operations.size||await digest(opBytes)!==manifest.operations.sha256)throw Error('Sünkroonimispaketi kontrollsumma ei klapi.');
     const operations=JSON.parse(new TextDecoder().decode(opBytes));if(!Array.isArray(operations)||operations.length!==manifest.operations.count)throw Error('Sünkroonimispaketi muudatuste loend on vigane.');
-    const preview=previewSyncOperations(operations),sum={newControls:preview.newControls,newDefects:preview.newDefects,repairedDefects:preview.repairedDefects,otherChanges:preview.otherChanges};
-    const body=`<b>TEISEST TELEFONIST:</b><div class="topgap">${syncSummaryHtml(sum)}</div><div class="topgap"><b>SELLES TELEFONIS:</b><br>${localPendingSyncCount()} saatmata muudatust</div><div class="topgap"><b>Lisandub või uueneb:</b> ${preview.newOperations}<br><b>Vastuolusid:</b> ${preview.conflicts}<br><b>Juba olemas:</b> ${preview.duplicates}</div>`;
-    const choice=await showAppChoice('SÜNKROONIMINE',body,[{value:'sync',label:preview.conflicts?'SÜNKROONI JA LAHENDA VASTUOLUD':'SÜNKROONI',primary:true},{value:'cancel',label:'TÜHISTA'}]);
-    if(choice!=='sync')return;
-    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'');if(report.conflicts)await resolvePendingSyncConflicts();
+    const preview=previewSyncOperations(operations),sum={newControls:preview.newControls,newDefects:preview.newDefects,repairedDefects:preview.repairedDefects,updatedDefects:preview.updatedDefects,cabinetStatusChanges:preview.cabinetStatusChanges,otherChanges:preview.otherChanges};
+    let choice='sync';
+    if(options.directPrepareOnly||options.directProtocol&&!options.directApplyConfirmed){
+      const direction=options.directRole||'TEISEST TELEFONIST';
+      choice=await showAppChoice('SÜNKROONIMINE',directSyncPreviewBody(direction,sum,preview),[{value:'sync',label:preview.conflicts?'SÜNKROONI JA LAHENDA VASTUOLUD':'SÜNKROONI',primary:true},{value:'cancel',label:'TÜHISTA'}]);
+      if(choice!=='sync')return {accepted:false,manifest,operations,preview,sum};
+    }else if(!options.directApplyConfirmed){
+      const body=`<b>TEISEST TELEFONIST:</b><div class="topgap">${syncSummaryHtml(sum)}</div><div class="topgap"><b>SELLES TELEFONIS:</b><br>${localPendingSyncCount()} saatmata muudatust</div><div class="topgap"><b>Lisandub või uueneb:</b> ${preview.newOperations}<br><b>Vastuolusid:</b> ${preview.conflicts}<br><b>Juba olemas:</b> ${preview.duplicates}</div>`;
+      choice=await showAppChoice('SÜNKROONIMINE',body,[{value:'sync',label:preview.conflicts?'SÜNKROONI JA LAHENDA VASTUOLUD':'SÜNKROONI',primary:true},{value:'cancel',label:'TÜHISTA'}]);
+      if(choice!=='sync')return {accepted:false,manifest,operations,preview,sum};
+    }
+    if(options.directPrepareOnly)return {accepted:true,manifest,operations,preview,sum};
+    const conflictChoices={};if(options.directProtocol&&preview.conflictItems.length){setBusy(false);for(const conflict of preview.conflictItems){const pick=await promptSyncConflict(conflict);if(!['local','remote'].includes(pick))return {accepted:false,manifest,operations,preview,sum};conflictChoices[conflict.conflictId]=pick;}setBusy(true);}
+    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null);if(report.conflicts&&!options.directProtocol)await resolvePendingSyncConflicts(conflictChoices);
+    if(options.directProtocol||options.directApplyConfirmed){renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};}
     await showAppChoice('SÜNKROONITUD',`Saadud:<br>${syncSummaryHtml(sum)}<div class="topgap">Telefoni enda muudatused säilitati.<br>Rakendatud: ${report.applied} • Juba olemas: ${report.duplicates} • Vastuolusid lahendati: ${report.conflicts}</div>`,[{value:'done',label:'JÄTKA',primary:true}]);
-    renderSyncStatus();
-  }catch(e){alert('Sünkroonimine ebaõnnestus. Telefoni senine töö jäi alles.\n'+e.message);}
-  finally{setBusy(false);ev.target.value='';}
+    renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};
+  }catch(e){if(options.directBootstrap||options.directProtocol)throw e;alert('Sünkroonimine ebaõnnestus. Telefoni senine töö jäi alles.\n'+e.message);}
+  finally{if(markedBusy)setBusy(false);clearInput?.();}
+}
+async function importSyncPackage(ev,sourceBytes=null){
+  const file=ev.target.files?.[0];if(!file)return;
+  try{const bytes=sourceBytes?new Uint8Array(sourceBytes):new Uint8Array(await file.arrayBuffer());return await processSyncPackageBytes(bytes,file.name,()=>{ev.target.value='';});}
+  catch(e){alert('Sünkroonimine ebaõnnestus. Telefoni senine töö jäi alles.\n'+(e.message||String(e)));ev.target.value='';}
 }
 function receiveWorkPackage(){selectNewWorkbook();}
-async function importWorkPackage(ev){
+async function importWorkPackage(ev,sourceBytes=null){
   if(TC.startupTask)await TC.startupTask;const file=ev.target.files?.[0];if(!file||TC.busy)return;setBusy(true);
   try{
-    const packageBytes=new Uint8Array(await file.arrayBuffer()),archive=await JSZip.loadAsync(packageBytes,{checkCRC32:true});
+    const packageBytes=sourceBytes?new Uint8Array(sourceBytes):new Uint8Array(await file.arrayBuffer()),archive=await JSZip.loadAsync(packageBytes,{checkCRC32:true});
     const manifestFile=archive.file('manifest.json'),stateFile=archive.file('state.json');if(!manifestFile||!stateFile)throw Error('Tööpaketis puudub manifest või rakenduse olek.');
     const manifest=JSON.parse(await manifestFile.async('string')),stateBytes=await stateFile.async('uint8array');
-    if(manifest.format!=='DOLD-TECHCONTROL-WORK-PACKAGE'||manifest.version!==1)throw Error('Seda DOLD tööpaketi versiooni ei toetata.');
+    if(manifest.format!==WORK_PACKAGE_FORMAT||manifest.version!==1)throw Error('Seda DOLD tööpaketi versiooni ei toetata.');
     const workbookEntry=archive.file(manifest.workbook?.path||'workbook.xlsx');if(!workbookEntry)throw Error('Tööpaketis puudub töövihik.');
     const workbookBytes=await workbookEntry.async('uint8array');if(manifest.workbook?.size&&workbookBytes.length!==manifest.workbook.size)throw Error('Töövihiku suurus ei klapi.');if(await digest(workbookBytes)!==manifest.workbook?.sha256)throw Error('Töövihiku kontrollsumma ei klapi. Pakett võib olla rikutud.');
     if(manifest.state?.size&&stateBytes.length!==manifest.state.size)throw Error('Rakenduse oleku suurus ei klapi.');if(await digest(stateBytes)!==manifest.state?.sha256)throw Error('Rakenduse oleku kontrollsumma ei klapi. Pakett võib olla rikutud.');

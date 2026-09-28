@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
@@ -32,26 +33,33 @@ import android.widget.Toast;
 import androidx.core.content.FileProvider;
 
 import com.google.zxing.BarcodeFormat;
+import com.google.zxing.EncodeHintType;
 import com.google.zxing.ResultPoint;
 import com.journeyapps.barcodescanner.BarcodeCallback;
 import com.journeyapps.barcodescanner.BarcodeResult;
 import com.journeyapps.barcodescanner.BarcodeView;
 import com.journeyapps.barcodescanner.DefaultDecoderFactory;
+import com.google.zxing.qrcode.QRCodeWriter;
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel;
 
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.util.HashMap;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends Activity {
     private static final int FILE_CHOOSER_REQUEST = 1101;
     private static final int CAMERA_PERMISSION_REQUEST = 1102;
     private static final int EXPORT_DOCUMENT_REQUEST = 1103;
     private WorkspaceStore workspaceStore;
+    private LanSyncTransport lanSyncTransport;
     private boolean darkTheme = false;
     private volatile String lastCameraId;
     private volatile long lastCameraAt;
@@ -79,6 +87,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         workspaceStore = new WorkspaceStore(getFilesDir());
+        lanSyncTransport = new LanSyncTransport();
         String savedUri = getPreferences(MODE_PRIVATE).getString("importUri", null);
         if (savedUri != null) importUri = Uri.parse(savedUri);
         setLightSystemBars();
@@ -132,7 +141,7 @@ public class MainActivity extends Activity {
                 Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType("*/*");
-                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.dold.techcontrol.workpackage", "application/zip", "application/octet-stream", "image/*"});
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.dold.techcontrol.workpackage", "application/vnd.dold.techcontrol.syncpackage", "application/zip", "application/octet-stream", "image/*"});
                 intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
                 if (importUri != null) intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, importUri);
 
@@ -558,6 +567,72 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String listWorkspaces(){try{return WorkspaceStore.ok(workspaceStore.list());}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String listWorkspaceErrors(){try{return WorkspaceStore.ok(workspaceStore.listErrors());}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String hashBytes(String base64){try{return WorkspaceStore.hash(Base64.decode(base64,Base64.DEFAULT));}catch(Exception e){throw new IllegalStateException(e);}}
+        @JavascriptInterface public String startLanSyncSession(String dbId,String responseBase64){
+            try {
+                byte[] response=decodeLanPayload(responseBase64);
+                return lanSyncTransport.startHost(dbId,response).toJson();
+            } catch(Exception e) { return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
+        }
+        @JavascriptInterface public String startLanSyncSessionDeferred(String dbId,String initialResponseBase64){
+            try {
+                byte[] initialResponse=decodeLanPayload(initialResponseBase64);
+                return lanSyncTransport.startHostDeferred(dbId,initialResponse).toJson();
+            } catch(Exception e) { return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
+        }
+        @JavascriptInterface public boolean respondLanSyncSession(String responseBase64,boolean terminal){
+            try { return lanSyncTransport!=null&&lanSyncTransport.respondHost(decodeLanPayload(responseBase64),terminal); }
+            catch(Exception e) { return false; }
+        }
+        @JavascriptInterface public boolean stopLanSyncSession(){return lanSyncTransport!=null&&lanSyncTransport.stopHost();}
+        @JavascriptInterface public String getLanSyncSessionStatus(){
+            try {
+                LanSyncTransport.HostStatus status=lanSyncTransport.getHostStatus();
+                JSONObject out=new JSONObject();out.put("status",status.status);out.put("error",status.error);
+                if(status.pairing!=null){out.put("expiresAt",status.pairing.expiresAt);out.put("sessionId",status.pairing.sessionId);}
+                if(status.receivedPayload!=null&&("REQUEST_RECEIVED".equals(status.status)||"ACK_RECEIVED".equals(status.status)||"COMPLETED".equals(status.status)))out.put("requestBase64",Base64.encodeToString(status.receivedPayload,Base64.NO_WRAP));
+                return out.toString();
+            } catch(Exception e) { return lanErrorJson("STATUS_UNAVAILABLE","Session status is unavailable."); }
+        }
+        @JavascriptInterface public String startLanSyncClient(String pairingJson,String expectedDbId,String requestBase64){
+            try {
+                if(pairingJson==null||pairingJson.length()>2048)return lanErrorJson("MALFORMED_PAIRING","Pairing information is invalid.");
+                JSONObject p=new JSONObject(pairingJson);
+                LanSyncTransport.PairingInfo info=new LanSyncTransport.PairingInfo(
+                        p.optInt("protocol",-1),p.optString("host",""),p.optInt("port",-1),
+                        p.optString("sessionId",""),p.optString("token",""),p.optLong("createdAt",0),
+                        p.optLong("expiresAt",0),p.optString("lineage",""));
+                byte[] request=decodeLanPayload(requestBase64);
+                LanSyncTransport.ClientJob job=lanSyncTransport.startClient(info,expectedDbId,request);
+                JSONObject out=new JSONObject();out.put("ok",true);out.put("jobId",job.id);out.put("status",job.getState());return out.toString();
+            } catch(Exception e) { return lanErrorJson("MALFORMED_PAIRING","Pairing information or payload is invalid."); }
+        }
+        @JavascriptInterface public String getLanSyncClientResult(String jobId){
+            try {
+                LanSyncTransport.ClientJob job=lanSyncTransport.getClientJob(jobId);
+                if(job==null)return lanErrorJson("UNKNOWN_JOB","LAN connection job was not found.");
+                JSONObject out=new JSONObject();out.put("jobId",job.id);out.put("status",job.getState());
+                LanSyncTransport.ClientResult result=job.getResult();
+                if(result!=null){out.put("result",result.status);if(result.isSuccess())out.put("responseBase64",Base64.encodeToString(result.payload,Base64.NO_WRAP));lanSyncTransport.consumeClientJob(jobId);}
+                return out.toString();
+            } catch(Exception e) { return lanErrorJson("RESULT_UNAVAILABLE","LAN result is unavailable."); }
+        }
+        @JavascriptInterface public String createLanSyncQrPngBase64(String payload,int size){
+            if(payload==null||payload.length()>2048||!payload.startsWith("DOLD-DIRECT-SYNC/1:")||size<320||size>1024)return "";
+            Bitmap bitmap=null;
+            try {
+                Map<EncodeHintType,Object> hints=new HashMap<>();
+                hints.put(EncodeHintType.MARGIN,4);
+                hints.put(EncodeHintType.ERROR_CORRECTION,ErrorCorrectionLevel.M);
+                com.google.zxing.common.BitMatrix matrix=new QRCodeWriter().encode(payload,BarcodeFormat.QR_CODE,size,size,hints);
+                int width=matrix.getWidth(),height=matrix.getHeight();int[] pixels=new int[width*height];
+                for(int y=0;y<height;y++)for(int x=0;x<width;x++)pixels[y*width+x]=matrix.get(x,y)?Color.BLACK:Color.WHITE;
+                bitmap=Bitmap.createBitmap(pixels,width,height,Bitmap.Config.ARGB_8888);
+                ByteArrayOutputStream output=new ByteArrayOutputStream();
+                if(!bitmap.compress(Bitmap.CompressFormat.PNG,100,output))return "";
+                return Base64.encodeToString(output.toByteArray(),Base64.NO_WRAP);
+            } catch(Exception e) { return ""; }
+            finally { if(bitmap!=null&&!bitmap.isRecycled())bitmap.recycle(); }
+        }
         @JavascriptInterface public long elapsedRealtime(){return SystemClock.elapsedRealtime();}
         @JavascriptInterface public void setTheme(boolean dark){runOnUiThread(()->{darkTheme=dark;if(!scannerActive)setLightSystemBars();});}
         @JavascriptInterface public boolean beginShareFile(String fileName,String mime){return beginShare(fileName,mime);}
@@ -600,6 +675,19 @@ public class MainActivity extends Activity {
         public String getAppVersion() {
             return "0.5.5";
         }
+    }
+
+    private byte[] decodeLanPayload(String base64) throws Exception {
+        if(base64==null||base64.isEmpty())return new byte[0];
+        if(base64.length()>((LanSyncTransport.MAX_PAYLOAD_BYTES+2L)/3L)*4L+8L)throw new IllegalArgumentException("Payload exceeds limit");
+        byte[] decoded=Base64.decode(base64,Base64.NO_WRAP);
+        if(decoded.length>LanSyncTransport.MAX_PAYLOAD_BYTES)throw new IllegalArgumentException("Payload exceeds limit");
+        return decoded;
+    }
+
+    private String lanErrorJson(String status,String message){
+        try {JSONObject out=new JSONObject();out.put("ok",false);out.put("status",status);out.put("message",message);return out.toString();}
+        catch(Exception e){return "{\"ok\":false,\"status\":\"ERROR\"}";}
     }
 
     @Override
@@ -694,6 +782,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         closeQrScanner(false);
         closePendingExportQuietly();
+        if(lanSyncTransport!=null)lanSyncTransport.close();
         if (webView != null) {
             webView.destroy();
         }

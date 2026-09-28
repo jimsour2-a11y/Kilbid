@@ -10,8 +10,8 @@ android {
         applicationId "ee.dold.techcontrol"
         minSdk 26
         targetSdk 35
-        versionCode 56
-        versionName "0.5.6"
+        versionCode 57
+        versionName "0.5.6.1"
     }
 
     buildTypes {

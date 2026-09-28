@@ -584,6 +584,7 @@ public class MainActivity extends Activity {
             catch(Exception e) { return false; }
         }
         @JavascriptInterface public boolean stopLanSyncSession(){return lanSyncTransport!=null&&lanSyncTransport.stopHost();}
+        @JavascriptInterface public boolean stopLanSyncSessionFor(String sessionId){return lanSyncTransport!=null&&lanSyncTransport.stopHostForSession(sessionId);}
         @JavascriptInterface public String getLanSyncSessionStatus(){
             try {
                 LanSyncTransport.HostStatus status=lanSyncTransport.getHostStatus();
@@ -673,7 +674,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getAppVersion() {
-            return "0.5.6";
+            return "0.5.6.1";
         }
     }
 

@@ -249,8 +249,19 @@ public final class LanSyncTransport implements AutoCloseable {
     }
 
     public synchronized boolean stopHost() {
+        return stopHostLocked(null);
+    }
+
+    /** Stops only the specified host session, so cleanup from an old flow cannot stop a newer QR. */
+    public synchronized boolean stopHostForSession(String expectedSessionId) {
+        if (expectedSessionId == null || expectedSessionId.isEmpty()) return false;
+        return stopHostLocked(expectedSessionId);
+    }
+
+    private boolean stopHostLocked(String expectedSessionId) {
         HostSession session = activeHost;
         if (session == null || session.isTerminal()) return false;
+        if (expectedSessionId != null && !expectedSessionId.equals(session.pairing.sessionId)) return false;
         session.cancel();
         return true;
     }
@@ -653,6 +664,10 @@ public final class LanSyncTransport implements AutoCloseable {
                 pendingResponse = payload == null ? new byte[0] : payload.clone();
                 pendingResponseTerminal = terminalResponse;
                 responseReady = true;
+                // Consume the visible request event synchronously. WebView polling must not
+                // observe the same REQUEST_RECEIVED / ACK_RECEIVED while the socket worker
+                // is still waking up to write this response.
+                state = "RESPONSE_QUEUED";
                 responseLock.notifyAll();
                 return true;
             }
@@ -789,12 +804,16 @@ public final class LanSyncTransport implements AutoCloseable {
                         }
                         if (exchangeCount == 0) pairedAddress = socket.getInetAddress();
                         receivedPayload = request.payload.clone();
-                        state = exchangeCount == 0 ? "REQUEST_RECEIVED" : "ACK_RECEIVED";
                         byte[] response;
                         boolean terminalResponse;
                         synchronized (responseLock) {
+                            // Clear the previous exchange before publishing the new event.
+                            // State is volatile, so publishing it first would allow the
+                            // JavaScript bridge to submit a response that this reset erases.
                             responseReady = false;
                             pendingResponse = null;
+                            pendingResponseTerminal = false;
+                            state = exchangeCount == 0 ? "REQUEST_RECEIVED" : "ACK_RECEIVED";
                             long responseDeadline = pairing.expiresAt;
                             while (!responseReady && !terminal.get()) {
                                 long wait = responseDeadline - System.currentTimeMillis();

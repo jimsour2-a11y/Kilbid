@@ -1,4 +1,4 @@
-/* DOLD TechControl 0.5.6. Keeps the existing JSZip workbook editor and native QR scanner.
+/* DOLD TechControl 0.5.6.1. Keeps the existing JSZip workbook editor and native QR scanner.
  * A save is acknowledged only after one atomic, complete native workspace commit.
  */
 const TC = {schema:1, dbId:null, registryKey:'', registryTokens:[], cycle:null,
@@ -10,7 +10,7 @@ const META_NAME='DOLD.TechControl.v1';
 const WORK_PACKAGE_FORMAT='DOLD-TECHCONTROL-WORK-PACKAGE';
 const WORK_PACKAGE_MIME='application/vnd.dold.techcontrol.workpackage';
 const SYNC_PACKAGE_MIME='application/vnd.dold.techcontrol.syncpackage';
-const APP_VERSION='0.5.6';
+const APP_VERSION='0.5.6.1';
 const cloneData=v=>JSON.parse(JSON.stringify(v));
 let appDialogResolve=null;
 function cloneWorkbook(zip){const copy=zip.clone();copy.files={...zip.files};return copy;}
@@ -924,7 +924,7 @@ async function prepareDirectSyncSession(){
     const archive=await JSZip.loadAsync(baseline,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Baaspaketist puudub manifest.');
     const manifest=JSON.parse(await mf.async('string'));
     return {status:'STARTED',pairing:parseDirectSyncQr(payload),payload,qrBase64,manifest,baselineSize:baseline.length,baselineBase64:bytesToBase64(baseline),deferred};
-  }catch(e){try{Android.stopLanSyncSession();}catch(ignore){}throw e;}
+  }catch(e){try{if(typeof Android.stopLanSyncSessionFor==='function'&&started.pairing?.sessionId)Android.stopLanSyncSessionFor(started.pairing.sessionId);else Android.stopLanSyncSession();}catch(ignore){}throw e;}
 }
 function cancelDirectSyncHost(){
   directHostGeneration++;try{if(window.Android&&typeof Android.stopLanSyncSession==='function')Android.stopLanSyncSession();}catch(e){}
@@ -1039,7 +1039,13 @@ async function showDirectSyncQr(){
     const choice=await showDirectDialog(noNetwork?'Kohalik võrk pole saadaval':'QR-sünkroonimist ei saanud alustada',esc(message),actions);if(choice==='package')await shareSyncBaseline();return;
   }
   if(session.deferred){
-    const generation=++directHostGeneration;renderDirectHostWaitScreen(session);const result=await runDirectSyncHostR4(session,generation);closeDirectStatusScreen();
+    const generation=++directHostGeneration;let result;
+    try{renderDirectHostWaitScreen(session);result=await runDirectSyncHostR4(session,generation);}
+    catch(e){result={status:'ERROR',error:e.message||String(e)};}
+    finally{
+      try{if(window.Android&&typeof Android.stopLanSyncSessionFor==='function')Android.stopLanSyncSessionFor(session.pairing.sessionId);}catch(e){}
+      closeDirectStatusScreen();
+    }
     if(result.bootstrap&&result.status==='COMPLETED')await showDirectDialog('ÜHENDATUD',`Baaspakett saadeti teise telefoni.<div class="topgap">Telefonis <b>${esc(session.manifest.fileName||'DOLD TechControl.xlsx')}</b> oodatakse enne salvestamist kasutaja kinnitust.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
     else if(result.status==='COMPLETED')await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(result.prepared?.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
     else if(result.status==='EXPIRED')await showDirectDialog('SESSIOON AEGUS','QR-kood on aegunud. Loo uus QR.');

@@ -673,7 +673,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getAppVersion() {
-            return "0.5.5";
+            return "0.5.6";
         }
     }
 

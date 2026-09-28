@@ -1,4 +1,4 @@
-/* DOLD TechControl 0.5.3. Keeps the existing JSZip workbook editor and native QR scanner.
+/* DOLD TechControl 0.5.6. Keeps the existing JSZip workbook editor and native QR scanner.
  * A save is acknowledged only after one atomic, complete native workspace commit.
  */
 const TC = {schema:1, dbId:null, registryKey:'', registryTokens:[], cycle:null,
@@ -10,7 +10,7 @@ const META_NAME='DOLD.TechControl.v1';
 const WORK_PACKAGE_FORMAT='DOLD-TECHCONTROL-WORK-PACKAGE';
 const WORK_PACKAGE_MIME='application/vnd.dold.techcontrol.workpackage';
 const SYNC_PACKAGE_MIME='application/vnd.dold.techcontrol.syncpackage';
-const APP_VERSION='0.5.5';
+const APP_VERSION='0.5.6';
 const cloneData=v=>JSON.parse(JSON.stringify(v));
 let appDialogResolve=null;
 function cloneWorkbook(zip){const copy=zip.clone();copy.files={...zip.files};return copy;}

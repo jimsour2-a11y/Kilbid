@@ -16,6 +16,7 @@ function persistentSyncId(type,value){
   const prefixes={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-',Cabinet:'dtc-cabinet-'},prefix=prefixes[type],id=String(value??'').trim();
   return prefix&&id.startsWith(prefix)&&/^[A-Za-z0-9_-]{1,180}$/.test(id.slice(prefix.length))?id:'';
 }
+function newPersistentSyncId(type){const prefix={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-'}[type];if(!prefix)throw Error('Tundmatu püsiva ID liik.');return prefix+uid();}
 let appDialogResolve=null;
 function cloneWorkbook(zip){const copy=zip.clone();copy.files={...zip.files};return copy;}
 function uid(){const a=new Uint32Array(4);crypto.getRandomValues(a);return [...a].map(n=>n.toString(16).padStart(8,'0')).join('');}
@@ -399,6 +400,12 @@ async function resolvePendingSyncConflicts(preselected={}){
   return decisions.length;
 }
 function writeSyncText(doc,col,row,value){if(value==null||value==='')clearInput(doc,col,row);else setInline(doc,col,row,String(value));}
+function writeIncomingPersistentId(doc,row,type,entityId){
+  const value=String(entityId||'').trim(),valid=persistentSyncId(type,value);if(!valid||valid!==value)throw Error('Sünkroonitud kirje püsiv ID on vigane.');
+  const current=String(getCellVal(doc,type==='Kontroll'?'AA':'S',row)||'').trim(),currentId=persistentSyncId(type,current);
+  if(current&&(!currentId||currentId!==value))throw Error('Tööfailis oleva püsiva ID asendamine peatati.');
+  writeSyncText(doc,type==='Kontroll'?'AA':'S',row,value);
+}
 function writeSyncDate(doc,col,row,value){
   if(value==null||value===''){clearInput(doc,col,row);return;}
   const s=String(value);if(/^\d{4}-\d{2}-\d{2}$/.test(s)){setDate(doc,col,row,s);return;}
@@ -415,6 +422,7 @@ function findIncomingRow(type,entityId){
 }
 async function writeIncomingControl(op,fields,values){
   const doc=await loadDoc('Kontrollid'),existingRow=findIncomingRow('Kontroll',op.entityId),row=existingRow||firstEmptyRow(doc,'B',5,Math.max(10000,...qsa(doc,'row').map(x=>Number(x.getAttribute('r'))))+1),styles=await ensureTimeStyles();
+  writeIncomingPersistentId(doc,row,'Kontroll',op.entityId);
   const textFields={cabinetId:'B',area:'C',inspector:'D',panel:'E',device:'F',location:'G',exception:'Z'};
   for(const [field,col] of Object.entries(textFields))if(Object.hasOwn(fields,field)){
     if(['C','E','F','G'].includes(col)&&isFormulaCell(getCell(doc,col+row)))continue;
@@ -435,11 +443,18 @@ async function writeIncomingControl(op,fields,values){
 }
 async function writeIncomingDefect(op,fields,values){
   const doc=await loadDoc('Puudused'),existingRow=findIncomingRow('Puudus',op.entityId),row=existingRow||firstEmptyRow(doc,'B',5,Math.max(10000,...qsa(doc,'row').map(x=>Number(x.getAttribute('r'))))+1);
+  const legacyUnresolved=!!(existingRow&&!String(getCellVal(doc,'S',row)||'').trim()&&String(getCellVal(doc,'U',row)||'').trim().toUpperCase()==='UNRESOLVED');
+  if(!legacyUnresolved)writeIncomingPersistentId(doc,row,'Puudus',op.entityId);
   const textFields={cabinetId:'B',inspector:'E',point:'F',description:'G',priority:'H',repeat:'I',owner:'J',repairer:'L',repairAction:'O',lastCheckedBy:'P'};
   for(const [field,col] of Object.entries(textFields))if(Object.hasOwn(fields,field))writeSyncText(doc,col,row,fields[field]);
   for(const [field,col] of [['cabinetTitle','C'],['location','D']])if(Object.hasOwn(fields,field)&&!isFormulaCell(getCell(doc,col+row)))writeSyncText(doc,col,row,fields[field]);
   if(Object.hasOwn(fields,'date'))writeSyncDate(doc,'A',row,fields.date);
   if(Object.hasOwn(fields,'due'))writeSyncDate(doc,'K',row,fields.due);
+  if(!legacyUnresolved&&Object.hasOwn(fields,'kontrollId')){
+    const linked=String(fields.kontrollId||'').trim();if(linked&&persistentSyncId('Kontroll',linked)!==linked)throw Error('Sünkroonitud puuduse KontrollID on vigane.');
+    writeSyncText(doc,'T',row,linked);
+    if(!existingRow&&linked){writeSyncText(doc,'U',row,'DIRECT');writeSyncText(doc,'V',row,'ANDROID CREATE');}
+  }
   if(Object.hasOwn(fields,'closedAt')){const styles=await ensureTimeStyles();writeSyncDate(doc,'M',row,fields.closedAt);if(fields.closedAt!=null&&fields.closedAt!=='')ensureCell(doc,'M',row).setAttribute('s',styles.time);}
   S.zip.file(S.paths.Puudused,xmlStr(doc));rememberIncomingRow('Puudus',op.entityId,row);
   const cycle=TC.cycle,link=cycle?.entries?.[values.cabinetId];if(cycle&&values.cycleId===cycle.id&&link){if(!values.kontrollId||!link.kontrollId||link.kontrollId===values.kontrollId)link.defectRows=[...new Set([...(link.defectRows||[]),row])];else{link.previousControlDefects??={};link.previousControlDefects[values.kontrollId]=[...new Set([...(link.previousControlDefects[values.kontrollId]||[]),row])];}}
@@ -757,6 +772,12 @@ async function saveInspection(goNext=false){
     const ctr=await loadDoc('Kontrollid'),def=await loadDoc('Puudused'),styles=await ensureTimeStyles();
     const row=opened.existing?.row||firstEmptyRow(ctr,'B',5,Math.max(10000,...qsa(ctr,'row').map(x=>Number(x.getAttribute('r'))))+1);
     if(opened.existing&&getCellVal(ctr,'B',row)!==c.id)throw Error('Kontrolli rida on muutunud');
+    const storedControlId=String(getCellVal(ctr,'AA',row)||'').trim(),storedControlSyncId=persistentSyncId('Kontroll',storedControlId),openedControlId=persistentSyncId('Kontroll',opened.existing?.syncId);
+    if(storedControlId&&!storedControlSyncId)throw Error('Kontrolli püsiv ID on vigane; tööfaili ei muudetud.');
+    if(storedControlSyncId&&openedControlId&&storedControlSyncId!==openedControlId)throw Error('Kontrolli püsiv ID on vahepeal muutunud.');
+    if(!opened.existing&&storedControlId)throw Error('Uue kontrolli reale on juba püsiv ID salvestatud.');
+    const controlId=wasNewDuplicate?newPersistentSyncId('Kontroll'):(storedControlSyncId||openedControlId||newPersistentSyncId('Kontroll'));
+    writeSyncText(ctr,'AA',row,controlId);
     setDate(ctr,'A',row,date);setInline(ctr,'B',row,c.id);setInline(ctr,'D',row,inspector);
     for(const [col,val] of [['C',c.area],['E',c.panel],['F',c.device],['G',c.location]])if(!isFormulaCell(getCell(ctr,col+row)))setInline(ctr,col,row,val);
     for(const [col] of CHECKS){const v=String(S.ratings[col]??'');if(v!=='')setNum(ctr,col,row,Number(v));else clearInput(ctr,col,row);}
@@ -766,8 +787,8 @@ async function saveInspection(goNext=false){
     const linked=TC.cycle.entries[c.id]?.defectRows||[],defectRows=[...linked];
     for(const d of S.stagedDefects){
       let rr=d.existingRow;
-      if(rr){if(getCellVal(def,'B',rr)!==c.id||getCellVal(def,'M',rr))throw Error('Puudus on vahepeal muutunud või suletud');}
-      else{rr=firstEmptyRow(def,'B',5,Math.max(10000,...qsa(def,'row').map(x=>Number(x.getAttribute('r'))))+1);setDate(def,'A',rr,date);setInline(def,'B',rr,c.id);setInline(def,'E',rr,inspector);for(const [col,val] of [['C',cabinetTitle(c)],['D',c.location]])if(!isFormulaCell(getCell(def,col+rr)))setInline(def,col,rr,val);defectRows.push(rr);}
+      if(rr){if(getCellVal(def,'B',rr)!==c.id||getCellVal(def,'M',rr))throw Error('Puudus on vahepeal muutunud või suletud');const stored=String(getCellVal(def,'S',rr)||'').trim(),storedId=persistentSyncId('Puudus',stored);if(stored&&!storedId)throw Error('Puuduse püsiv ID on vigane; tööfaili ei muudetud.');if(storedId&&d.syncId&&storedId!==d.syncId)throw Error('Puuduse püsiv ID on vahepeal muutunud.');}
+      else{rr=firstEmptyRow(def,'B',5,Math.max(10000,...qsa(def,'row').map(x=>Number(x.getAttribute('r'))))+1);setDate(def,'A',rr,date);setInline(def,'B',rr,c.id);setInline(def,'E',rr,inspector);for(const [col,val] of [['C',cabinetTitle(c)],['D',c.location]])if(!isFormulaCell(getCell(def,col+rr)))setInline(def,col,rr,val);writeSyncText(def,'S',rr,newPersistentSyncId('Puudus'));writeSyncText(def,'T',rr,controlId);writeSyncText(def,'U',rr,'DIRECT');writeSyncText(def,'V',rr,'ANDROID CREATE');defectRows.push(rr);}
       for(const [col,val] of [['F',d.point],['G',d.desc],['H',d.grade],['I',d.repeat],['J',d.owner]])setInline(def,col,rr,val||'');if(d.due)setDate(def,'K',rr,d.due);else clearInput(def,'K',rr);
     }
     if(S.stagedDefects.length)S.zip.file(S.paths.Puudused,xmlStr(def));
@@ -776,7 +797,7 @@ async function saveInspection(goNext=false){
     const priorEntry=TC.cycle.entries[c.id]||{},oldControl=priorEntry.kontrollId||TC.records.find(r=>r.id===c.id&&r.row===priorEntry.row&&(!priorEntry.fingerprint||recordFingerprint(r)===priorEntry.fingerprint))?.syncId;
     const additionalIds=new Set(priorEntry.additionalKontrollIds||[]);if(wasNewDuplicate&&oldControl)additionalIds.add(oldControl);
     const previousControlDefects={...(priorEntry.previousControlDefects||{})};if(wasNewDuplicate&&oldControl&&priorEntry.defectRows?.length)previousControlDefects[oldControl]=[...new Set([...(previousControlDefects[oldControl]||[]),...priorEntry.defectRows])];
-    TC.cycle.entries[c.id]={...priorEntry,row,fingerprint,defectRows:[...new Set(wasNewDuplicate?defectRows.filter(x=>!priorEntry.defectRows?.includes(x)):defectRows)],note:$('inspectComment').value,...(wasNewDuplicate&&additionalIds.size?{additionalKontrollIds:[...additionalIds]}:{}),...(Object.keys(previousControlDefects).length?{previousControlDefects}:{})};
+    TC.cycle.entries[c.id]={...priorEntry,row,fingerprint,kontrollId:controlId,defectRows:[...new Set(wasNewDuplicate?defectRows.filter(x=>!priorEntry.defectRows?.includes(x)):defectRows)],note:$('inspectComment').value,...(wasNewDuplicate&&additionalIds.size?{additionalKontrollIds:[...additionalIds]}:{}),...(Object.keys(previousControlDefects).length?{previousControlDefects}:{})};
     if(TC.guard.pending&&opened.proved){TC.guard.pending=null;TC.guard.remaining=randomGap();}else if(!opened.proved&&!wasEdit)TC.guard.remaining=Math.max(1,TC.guard.remaining-1);
     S.inspector=inspector;S.dirty=true;
   });

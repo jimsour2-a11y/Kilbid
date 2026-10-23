@@ -84,7 +84,8 @@ function advance(s){clock.mono+=s*1000;clock.offset+=s*1000;}
 async function count(sheet){return run(`(async()=>{const d=await loadDoc(${JSON.stringify(sheet)});return qsa(d,'row').filter(r=>Number(r.getAttribute('r'))>=5&&getCellVal(d,'B',Number(r.getAttribute('r')))).length;})()`);}
 async function freshWorkspace(label,bytes){const dir=path.join(out,label);fs.rmSync(dir,{recursive:true,force:true});fs.mkdirSync(dir,{recursive:true});storeDir=dir;env=makeContext();await run('TC.startupTask');await importBytes(bytes,label+'.xlsx');return dir;}
 async function saveTestInspection(id,desc=''){await run('openCab('+JSON.stringify(id)+')');el('inspector').value='Stage 12 tester';run('setAllScores(4)');if(desc)run(`S.stagedDefects=[{point:'Stage 12',desc:${JSON.stringify(desc)},grade:'C',repeat:'Ei',owner:'Stage 12 tester',due:plusDays(today(),30)}]`);advance(61);await run('saveInspection()');}
-const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),focusedSetup=(testFilter.includes('r1 package')||testFilter.includes('r1 persistent id')||testFilter.startsWith('r2'))&&name.startsWith('A import');if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!focusedSetup&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!focusedSetup)results.push({name,status:'PASS'});console.log(focusedSetup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
+async function r3Prepare(label,workbookBytes,n=4,firstDefect=false){await freshWorkspace(label,workbookBytes);run('TC.guard.remaining=100');await run('resetRingProgress()');const ids=run(`activeCabinets().slice(0,${n}).map(c=>c.id)`);for(let i=0;i<ids.length;i++)await saveTestInspection(ids[i],firstDefect&&i===0?'R3 linked defect':'');return {ids,cycle:JSON.parse(JSON.stringify(run('TC.cycle'))),snapshot:JSON.parse(JSON.stringify(await run('storeCall("get",TC.dbId)'))),controls:await count('Kontrollid'),defects:await count('Puudused')};}
+const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),legacyR3=testFilter.includes('r3 legacy'),r3CycleCase=/^r3 (stale cycle|fuller incoming cycle|identical cycle entries|missing incoming cycle metadata|row movement and rounded excel w|additional kontrollids|legacy cycle adopts)/i.test(name),focusedSetup=(testFilter.includes('r1 package')||testFilter.includes('r1 persistent id')||testFilter.startsWith('r2')||(testFilter.includes('r3')&&!legacyR3))&&name.startsWith('A import');if(r3CycleCase&&!testFilter&&process.env.DTC_RUN_R3!=='1')return;if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!focusedSetup&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!focusedSetup)results.push({name,status:'PASS'});console.log(focusedSetup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
 (async()=>{
 const bytes=fs.readFileSync(fixture);const original=await JSZip.loadAsync(bytes);const originalSheetNames=await workbookSheetNames(original);let initialRows,initialDefects,id,other,firstRow,firstStart,cycleId;
 await test('A import current workbook, dynamic active count, reserve IDs hidden',async()=>{
@@ -803,6 +804,87 @@ await test('R5 safety failures keep durable work recoverable across the two-exch
  assert(checks.length>=50,`R5 safety coverage dropped below 50 checks: ${checks.length}`);
  fs.writeFileSync(path.join(out,'r5-results.json'),JSON.stringify({passed:checks.length,total:checks.length,cases:checks},null,2));
  console.log(`R5 SAFETY ${checks.length}/${checks.length} PASS`);
+});
+await test('R3 stale cycle metadata on same database must preserve four local Kontroll IDs',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  await freshWorkspace('r3-stale-cycle-metadata',bytes);run('TC.guard.remaining=100');await run('resetRingProgress()');
+  const cabinets=run('activeCabinets().slice(0,4).map(c=>c.id)');
+  for(let i=0;i<cabinets.length;i++)await saveTestInspection(cabinets[i],i===0?'R3 linked defect':'');
+  assert.equal(run('S.sessionChecked.size'),4);const localCycle=JSON.parse(JSON.stringify(run('TC.cycle')));
+  assert(cabinets.every(id=>localCycle.entries[id]?.kontrollId),'Every saved cycle entry should already have a persistent KontrollID');
+  const incomingBytes=await run(`(async()=>{const current=S.zip;S.zip=cloneWorkbook(current);const complete=cloneData(TC.cycle),first=${JSON.stringify(cabinets[0])};TC.cycle={...complete,id:'stale-import-cycle',entries:{[first]:cloneData(complete.entries[first])}};await writeMetadata();const bytes=await S.zip.generateAsync({type:'uint8array'});S.zip=current;TC.cycle=complete;return bytes;})()`);
+  await importBytes(Buffer.from(incomingBytes),'updated_same_database.xlsx','merge');
+  assert.equal(run('S.sessionChecked.size'),4,'Importing stale/different embedded cycle metadata must not reduce 4 checked cabinets');
+  for(const id of cabinets)assert.equal(run(`savedEntry(${JSON.stringify(id)})?.syncId`),localCycle.entries[id].kontrollId);
+  assert.equal(await count('Kontrollid'),initialRows+4);
+  assert(run(`TC.cycle.entries[${JSON.stringify(cabinets[0])}].defectRows.length>0`),'Existing defect links must remain attached');
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 fuller incoming cycle unions its permanent IDs with the local cycle',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  await freshWorkspace('r3-incoming-fuller',bytes);run('TC.guard.remaining=100');await run('resetRingProgress()');const cabinets=run('activeCabinets().slice(0,4).map(c=>c.id)');
+  await saveTestInspection(cabinets[0]);await saveTestInspection(cabinets[1]);const localSnapshot=JSON.parse(JSON.stringify(await run('storeCall("get",TC.dbId)'))),cycleId=run('TC.cycle.id');
+  await saveTestInspection(cabinets[2]);await saveTestInspection(cabinets[3]);const incoming=Buffer.from(await run('persistWorkspace()'));
+  env.cx.r3LocalSnapshot=localSnapshot;await run('storeCall("put",r3LocalSnapshot)');await importBytes(incoming,'peer_fuller_same_cycle.xlsx','merge');
+  assert.equal(run('TC.cycle.id'),cycleId);assert.equal(run('S.sessionChecked.size'),4);assert(cabinets.every(id=>run(`!!savedEntry(${JSON.stringify(id)})`)));assert.equal(await count('Kontrollid'),initialRows+4);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 identical cycle entries remain stable and do not duplicate records',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  const created=await r3Prepare('r3-identical-cycle',bytes,2),cycleId=created.cycle.id,incoming=Buffer.from(await run('persistWorkspace()'));
+  await importBytes(incoming,'same_cycle_export.xlsx','merge');assert.equal(run('TC.cycle.id'),cycleId);assert.equal(run('S.sessionChecked.size'),2);assert.equal(Object.keys(run('TC.cycle.entries')).length,2);assert.equal(await count('Kontrollid'),created.controls);
+  for(const id of created.ids)assert.equal(run(`savedEntry(${JSON.stringify(id)}).syncId`),created.cycle.entries[id].kontrollId);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 missing incoming cycle metadata preserves local IDs from Kontrollid AA',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  const created=await r3Prepare('r3-missing-embedded-cycle',bytes,3),incoming=await run(`(async()=>{const current=S.zip;S.zip=cloneWorkbook(current);const cycle=TC.cycle;TC.cycle=null;await writeMetadata();const bytes=await S.zip.generateAsync({type:'uint8array'});S.zip=current;TC.cycle=cycle;return bytes;})()`);
+  await importBytes(Buffer.from(incoming),'same_database_no_cycle_metadata.xlsx','merge');assert.equal(run('S.sessionChecked.size'),3);assert.equal(run('TC.cycle.id'),created.cycle.id);
+  for(const id of created.ids)assert.equal(run(`savedEntry(${JSON.stringify(id)}).syncId`),created.cycle.entries[id].kontrollId);
+  assert.equal(await count('Kontrollid'),created.controls);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 row movement and rounded Excel W restore by KontrollID and retain defect links',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  const created=await r3Prepare('r3-row-w-stability',bytes,3,true),controlIds=created.ids.map(id=>created.cycle.entries[id].kontrollId),expectedRows=JSON.parse(JSON.stringify(run(`TC.allDefects.filter(d=>d.kontrollId===${JSON.stringify(controlIds[0])}).map(d=>d.row)`)));
+  const beforeRows=created.controls,changed=await run(`(async()=>{const doc=await loadDoc('Kontrollid'),targets=${JSON.stringify(controlIds)},moved={};for(const id of targets){const row=TC.records.find(r=>r.syncId===id)?.row;if(!row)throw Error('missing control '+id);const value=Number(getCellVal(doc,'W',row));if(Number.isFinite(value))setNum(doc,'W',row,value+0.000000005);const node=qsa(doc,'row').find(x=>Number(x.getAttribute('r'))===row),newRow=row+10000;node.setAttribute('r',String(newRow));for(const cell of qsa(node,'c'))cell.setAttribute('r',refCol(cell.getAttribute('r'))+newRow);moved[id]=newRow;}S.zip.file(S.paths.Kontrollid,xmlStr(doc));return {moved,bytes:await S.zip.generateAsync({type:'uint8array'})};})()`);
+  // Reload through a VM global so the actual workbook parser and hydrator run.
+  env.cx.r3ReloadBytes=Buffer.from(changed.bytes);await run('loadBook(r3ReloadBytes,"moved_and_rounded.xlsx")');
+  assert.equal(run('S.sessionChecked.size'),3);assert.equal(await count('Kontrollid'),beforeRows);
+  for(const id of created.ids){const entry=run(`savedEntry(${JSON.stringify(id)})`);assert(entry);assert.equal(entry.syncId,created.cycle.entries[id].kontrollId);assert.equal(entry.row,changed.moved[entry.syncId]);assert.equal(run(`TC.cycle.entries[${JSON.stringify(id)}].row`),entry.row);}
+  const linkedDefect=run(`TC.allDefects.find(d=>d.kontrollId===${JSON.stringify(controlIds[0])})`);assert(linkedDefect);assert(run(`TC.cycle.entries[${JSON.stringify(created.ids[0])}].defectRows.includes(${linkedDefect.row})`));assert.deepEqual(expectedRows,[linkedDefect.row]);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 additional KontrollIDs survive cycle merge without double-counting EK',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};
+ try{
+  await freshWorkspace('r3-additional-control-ids',bytes);run('TC.guard.remaining=100');await run('resetRingProgress()');const cabinet=run('activeCabinets()[0].id');await saveTestInspection(cabinet,'R3 previous-control defect');const firstId=run(`savedEntry(${JSON.stringify(cabinet)}).syncId`);
+  await openCabWithChoices(cabinet,'camera',['new','create']);el('inspector').value='Stage 12 tester';run('setAllScores(4)');advance(61);await run('saveInspection()');const localEntry=JSON.parse(JSON.stringify(run(`TC.cycle.entries[${JSON.stringify(cabinet)}]`))),primaryId=localEntry.kontrollId;
+  assert.notEqual(primaryId,firstId);assert(localEntry.additionalKontrollIds.includes(firstId));assert.equal(run('S.sessionChecked.size'),1);
+  const rebuilt=run(`cycleFromRecords(TC.records.filter(r=>[${JSON.stringify(firstId)},${JSON.stringify(primaryId)}].includes(r.syncId)))`);assert.equal(rebuilt.entries[cabinet].kontrollId,primaryId);assert(rebuilt.entries[cabinet].additionalKontrollIds.includes(firstId));const oldDefectRow=run(`TC.allDefects.find(d=>d.kontrollId===${JSON.stringify(firstId)}).row`);assert(rebuilt.entries[cabinet].previousControlDefects[firstId].includes(oldDefectRow));
+  const incoming=await run(`(async()=>{const current=S.zip;S.zip=cloneWorkbook(current);const link=TC.cycle.entries[${JSON.stringify(cabinet)}];TC.cycle=cloneData(TC.cycle);delete TC.cycle.entries[${JSON.stringify(cabinet)}].additionalKontrollIds;delete TC.cycle.entries[${JSON.stringify(cabinet)}].previousControlDefects;await writeMetadata();const bytes=await S.zip.generateAsync({type:'uint8array'});S.zip=current;TC.cycle={...TC.cycle,entries:{...TC.cycle.entries,[${JSON.stringify(cabinet)}]:cloneData(link)}};return bytes;})()`);
+  await importBytes(Buffer.from(incoming),'additional_control_peer.xlsx','merge');const merged=run(`TC.cycle.entries[${JSON.stringify(cabinet)}]`);
+  assert.equal(merged.kontrollId,primaryId);assert(merged.additionalKontrollIds.includes(firstId));assert.equal(run('S.sessionChecked.size'),1);assert.equal(run(`savedEntry(${JSON.stringify(cabinet)}).syncId`),primaryId);
+  const linkedDefect=run(`TC.allDefects.find(d=>d.kontrollId===${JSON.stringify(firstId)})`);assert(linkedDefect);assert(merged.previousControlDefects[firstId].includes(linkedDefect.row));assert.equal(await count('Kontrollid'),initialRows+2);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('R3 legacy cycle adopts a unique no-AA record and then remains stable by migrated ID',async()=>{
+ const legacyPath=process.env.DTC_R3_LEGACY_FIXTURE;if(!legacyPath)throw Error('Set DTC_R3_LEGACY_FIXTURE to the supplied v1.1 legacy workbook');
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock},legacyBytes=fs.readFileSync(legacyPath);
+ try{
+  await freshWorkspace('r3-legacy-cycle-id-migration',legacyBytes);
+  const record=run(`TC.records.find(r=>!r.persistentId&&r.start&&TC.records.filter(x=>x.id===r.id&&x.date===r.date&&x.inspector===r.inspector&&realStartFromRecord(x)===realStartFromRecord(r)).length===1)`);assert(record,'Legacy workbook needs one uniquely matchable control without AA ID');
+  const cabinet=record.id,originalId=record.syncId,legacyEntry={row:record.row,fingerprint:run(`recordFingerprint(TC.records.find(r=>r.row===${record.row}))`),defectRows:[],note:''};
+  run(`TC.cycle={id:'r3-legacy-migration',startedAt:${JSON.stringify(record.date)},startSource:'records',entries:{[${JSON.stringify(cabinet)}]:${JSON.stringify(legacyEntry)}}};reconcileCycle()`);assert(run(`S.sessionChecked.has(${JSON.stringify(cabinet)})`));await run('ensureSyncState()');const migrated=run(`TC.cycle.entries[${JSON.stringify(cabinet)}].kontrollId`);assert(migrated);assert.equal(migrated,originalId);
+  const changed=await run(`(async()=>{const doc=await loadDoc('Kontrollid'),id=${JSON.stringify(cabinet)},row=TC.records.find(r=>r.id===id&&r.syncId===${JSON.stringify(migrated)}).row,value=Number(getCellVal(doc,'W',row)),node=qsa(doc,'row').find(x=>Number(x.getAttribute('r'))===row),newRow=row+10000;if(Number.isFinite(value))setNum(doc,'W',row,value+0.000000005);node.setAttribute('r',String(newRow));for(const cell of qsa(node,'c'))cell.setAttribute('r',refCol(cell.getAttribute('r'))+newRow);S.zip.file(S.paths.Kontrollid,xmlStr(doc));return {newRow,bytes:await S.zip.generateAsync({type:'uint8array'})};})()`);
+  env.cx.r3ReloadBytes=Buffer.from(changed.bytes);await run('loadBook(r3ReloadBytes,"legacy_moved_control.xlsx")');
+  assert.equal(run('S.sessionChecked.size'),1);assert.equal(run(`savedEntry(${JSON.stringify(cabinet)}).syncId`),migrated);assert.equal(run(`TC.cycle.entries[${JSON.stringify(cabinet)}].kontrollId`),migrated);assert.equal(run(`TC.cycle.entries[${JSON.stringify(cabinet)}].row`),changed.newRow);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
 fs.writeFileSync(path.join(out,'results.json'),JSON.stringify({adapter:'Node VM with XML/form adapter and fsync-backed bridge; not Android/WebView',input:path.basename(fixture),results},null,2));console.log('PASS ALL',results.length);
 })().catch(e=>{fs.writeFileSync(path.join(out,'results.json'),JSON.stringify({results,alerts,error:e.stack},null,2));process.exitCode=1;});

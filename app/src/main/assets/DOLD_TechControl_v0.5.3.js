@@ -32,13 +32,14 @@ function syncDefectBase(d){return [d.id,d.date,d.inspector,d.point].map(syncFiel
 function syncControlValues(r){
   const c=S.cabinets.find(x=>x.id===r.id),values={cabinetId:r.id,date:r.date,area:c?.area||'',inspector:r.inspector,panel:c?.panel||'',device:c?.device||'',location:c?.location||'',start:r.start||'',end:r.end||'',duration:r.duration||0,exception:r.exception||''};
   for(const [col] of CHECKS)values['score_'+col]=r.ratings?.[col]||'';
-  const link=TC.cycle?.entries?.[r.id];if(link&&(link.fingerprint===recordFingerprint(r)||link.additionalKontrollIds?.includes(r.syncId))){values.cycleId=TC.cycle.id;if(link.fingerprint===recordFingerprint(r))values.note=link.note||'';}
+  const link=TC.cycle?.entries?.[r.id],primaryId=persistentSyncId('Kontroll',link?.kontrollId),isPrimary=!!primaryId&&primaryId===r.syncId,isAdditional=cycleEntryControlIds(link).includes(r.syncId)&&!isPrimary;
+  if(link&&(isPrimary||isAdditional||(!primaryId&&link.fingerprint===recordFingerprint(r)))){values.cycleId=TC.cycle.id;if(isPrimary||(!primaryId&&link.fingerprint===recordFingerprint(r)))values.note=link.note||'';}
   return values;
 }
 function syncDefectValues(d){
   const values={cabinetId:d.id,date:d.date,inspector:d.inspector,cabinetTitle:d.cabinetTitle||'',location:d.location||'',point:d.point||'',description:d.desc||'',priority:d.grade||'',repeat:d.repeat||'',owner:d.owner||'',due:d.due||'',repairer:d.repairer||'',closedAt:d.closedAt||'',repairAction:d.repairAction||'',lastCheckedBy:d.lastCheckedBy||''};
-  const link=TC.cycle?.entries?.[d.id],priorControlId=Object.entries(link?.previousControlDefects||{}).find(([,rows])=>rows?.includes(d.row))?.[0],belongsToCycle=!!(link?.defectRows?.includes(d.row)||priorControlId);
-  const cycleControlId=link?.defectRows?.includes(d.row)?(link.kontrollId||TC.records.find(r=>r.row===link.row&&r.id===d.id&&recordFingerprint(r)===link.fingerprint)?.syncId):priorControlId;
+  const link=TC.cycle?.entries?.[d.id],knownControlIds=cycleEntryControlIds(link),linkedControlId=knownControlIds.includes(d.kontrollId)?d.kontrollId:'',priorControlId=linkedControlId&&link?.previousControlDefects?.[linkedControlId]?linkedControlId:Object.entries(link?.previousControlDefects||{}).find(([,rows])=>rows?.includes(d.row))?.[0],hasCurrentLink=!!(linkedControlId&&linkedControlId===persistentSyncId('Kontroll',link?.kontrollId)),legacyCurrentLink=!knownControlIds.length&&!!link?.defectRows?.includes(d.row),belongsToCycle=!!(hasCurrentLink||linkedControlId||legacyCurrentLink||priorControlId);
+  const cycleControlId=linkedControlId||(legacyCurrentLink?(link.kontrollId||TC.records.find(r=>r.row===link.row&&r.id===d.id&&recordFingerprint(r)===link.fingerprint)?.syncId):priorControlId);
   const controlId=d.kontrollId||cycleControlId;
   if(controlId)values.kontrollId=controlId;
   if(link&&belongsToCycle)values.cycleId=TC.cycle.id;
@@ -46,6 +47,39 @@ function syncDefectValues(d){
 }
 function syncCabinetValues(c){return {cabinetId:c.id,status:c.status||''};}
 function syncCanonical(v){return JSON.stringify(v);}
+function cycleEntryControlIds(link){
+  if(!link||typeof link!=='object')return[];
+  return [...new Set([persistentSyncId('Kontroll',link.kontrollId),...(Array.isArray(link.additionalKontrollIds)?link.additionalKontrollIds.map(id=>persistentSyncId('Kontroll',id)):[]),...Object.keys(link.previousControlDefects||{}).map(id=>persistentSyncId('Kontroll',id))].filter(Boolean))];
+}
+function controlEntityMatchesRecord(values,record){
+  if(!values||String(values.cabinetId||'')!==String(record.id||'')||String(values.date||'')!==String(record.date||'')||String(values.inspector||'')!==String(record.inspector||''))return false;
+  const oldStart=realStartFromRecord({date:values.date,start:values.start}),newStart=realStartFromRecord(record);
+  return oldStart&&newStart?oldStart===newStart:String(values.start??'')===String(record.start??'');
+}
+function findCycleRecordByIds(cabinetId,link){
+  const ids=cycleEntryControlIds(link),records=ids.map(id=>TC.records.find(r=>r.id===cabinetId&&r.syncId===id)||null);
+  return {ids,primary:ids.length?records[0]:null,matched:records.filter(Boolean)};
+}
+function findLegacyCycleRecord(cabinetId,link){
+  if(!link)return null;
+  const byHint=TC.records.find(r=>r.id===cabinetId&&r.row===Number(link.row)&&(!link.fingerprint||recordFingerprint(r)===link.fingerprint));
+  if(byHint)return byHint;
+  if(link.fingerprint){
+    const exact=TC.records.find(r=>r.id===cabinetId&&recordFingerprint(r)===link.fingerprint);if(exact)return exact;
+    const parts=String(link.fingerprint).split('|'),date=parts[1]||'',inspector=parts[2]||'',oldStart=parts.slice(3).join('|'),targetStart=realStartFromRecord({id:cabinetId,date,inspector,start:oldStart});
+    const near=TC.records.filter(r=>r.id===cabinetId&&r.date===date&&r.inspector===inspector&&targetStart&&realStartFromRecord(r)===targetStart);
+    if(near.length===1)return near[0];
+    if(!oldStart){const unique=TC.records.filter(r=>r.id===cabinetId&&r.date===date&&r.inspector===inspector);if(unique.length===1)return unique[0];}
+  }
+  return null;
+}
+function reconcileCycleDefectLinks(cabinetId,link){
+  const ids=cycleEntryControlIds(link);if(!ids.length)return;
+  const primaryId=persistentSyncId('Kontroll',link.kontrollId);
+  const primaryRows=TC.allDefects.filter(d=>d.id===cabinetId&&d.kontrollId===primaryId).map(d=>d.row);
+  if(primaryId&&primaryRows.length)link.defectRows=primaryRows;
+  for(const controlId of ids){if(controlId===primaryId)continue;const rows=TC.allDefects.filter(d=>d.id===cabinetId&&d.kontrollId===controlId).map(d=>d.row);if(rows.length){link.previousControlDefects??={};link.previousControlDefects[controlId]=rows;}}
+}
 async function ensureSyncState(){
   if(!TC.dbId)return;
   TC.deviceId=installationDeviceId();
@@ -61,7 +95,16 @@ async function ensureSyncState(){
         const item=list[i],row=String(item.row),pending=TC.pendingSyncRowIds?.[type]?.[row],persistentId=persistentSyncId(type,item.persistentId);
         if(persistentId&&pending&&persistentId!==pending)throw Error('Tööfaili püsiv ID ei klapi sünkroonitud kirje ID-ga.');
         if(persistentId&&used.has(persistentId))throw Error('Tööfailis kordub püsiv kirje ID: '+persistentId);
-        let key=base+'#'+(i+1),entityId=persistentId||pending||Object.keys(entities).find(id=>!used.has(id)&&entities[id]?.key===key);
+        let key=base+'#'+(i+1),entityId=persistentId||pending;
+        if(!entityId&&type==='Kontroll'){
+          const linked=cycleEntryControlIds(TC.cycle?.entries?.[item.id]).filter(id=>!used.has(id)&&entities[id]&&controlEntityMatchesRecord(entities[id].values,item));
+          if(linked.length===1)entityId=linked[0];
+        }
+        if(!entityId)entityId=Object.keys(entities).find(id=>!used.has(id)&&entities[id]?.key===key);
+        if(!entityId&&type==='Kontroll'){
+          const legacy=Object.keys(entities).filter(id=>!used.has(id)&&controlEntityMatchesRecord(entities[id]?.values,item));
+          if(legacy.length===1)entityId=legacy[0];
+        }
         if(entityId&&used.has(entityId))entityId=null;
         if(!entityId&&TC.pendingSyncRowIds)entityId=`dtc-${type.toLowerCase()}-new-${TC.deviceId.slice(-8)}-${uid()}`;
         if(!entityId){const seed=`${TC.dbId}|${type}|${key}`;entityId=`dtc-${type.toLowerCase()}-${(await digest(new TextEncoder().encode(seed))).slice(0,32)}`;if(used.has(entityId)){let n=i+1;do{key=base+'#'+(++n);entityId=`dtc-${type.toLowerCase()}-${(await digest(new TextEncoder().encode(`${TC.dbId}|${type}|${key}`))).slice(0,32)}`;}while(used.has(entityId));}}
@@ -70,12 +113,18 @@ async function ensureSyncState(){
     }
   };
   await assign('Kontroll',TC.records,syncControlBase,syncControlValues);
+  let migratedCycleIdentity=false;
   for(const [cabinetId,link] of Object.entries(TC.cycle?.entries||{})){
-    const r=TC.records.find(x=>x.syncId&&x.id===cabinetId&&((x.row===link.row&&(!link.fingerprint||recordFingerprint(x)===link.fingerprint))||(link.fingerprint&&recordFingerprint(x)===link.fingerprint)));
-    if(r)link.kontrollId=r.syncId;
+    if(!link||typeof link!=='object')continue;
+    const linked=findCycleRecordByIds(cabinetId,link);
+    if(linked.primary){link.row=linked.primary.row;link.fingerprint=recordFingerprint(linked.primary);}
+    else if(!linked.ids.length){const legacy=findLegacyCycleRecord(cabinetId,link);if(legacy&&legacy.syncId){link.kontrollId=legacy.syncId;link.row=legacy.row;link.fingerprint=recordFingerprint(legacy);migratedCycleIdentity=true;}}
+    reconcileCycleDefectLinks(cabinetId,link);
   }
+  if(migratedCycleIdentity)await assign('Kontroll',TC.records,syncControlBase,syncControlValues);
   await assign('Puudus',TC.allDefects,syncDefectBase,syncDefectValues);
   await assign('Cabinet',S.cabinets,c=>c.id,syncCabinetValues);
+  reconcileCycle();
   if(TC.pendingSyncRowIds)TC.pendingSyncRowIds=null;
 }
 function nativeStore(){return !!(window.Android&&typeof Android.saveWorkspace==='function');}
@@ -127,7 +176,7 @@ function cycleStartFromRecords(records,fallback){
   return null;
 }
 function cycleStartLabel(cycle){
-  const linked=[];for(const [id,link] of Object.entries(cycle?.entries||{})){const r=TC.records.find(x=>x.id===id&&((x.row===link.row&&(!link.fingerprint||recordFingerprint(x)===link.fingerprint))||(link.fingerprint&&recordFingerprint(x)===link.fingerprint)));if(r)linked.push(r);}
+  const linked=[];for(const [id,link] of Object.entries(cycle?.entries||{})){const stable=findCycleRecordByIds(id,link);if(stable.ids.length){linked.push(...stable.matched);continue;}const legacy=findLegacyCycleRecord(id,link);if(legacy)linked.push(legacy);}
   const stored=String(cycle?.startedAt||''),d=stored?new Date(stored):null,storedMidnight=!!(d&&!Number.isNaN(d.getTime())&&d.getHours()===0&&d.getMinutes()===0&&d.getSeconds()===0);
   if(cycle?.startSource==='records'||(!cycle?.startSource&&linked.length&&storedMidnight)){
     const actual=cycleStartFromRecords(linked,null);if(actual)return actual.length>10?`${actual.slice(8,10)}.${actual.slice(5,7)}.${actual.slice(0,4)} ${actual.slice(11,19)}`:`${actual.slice(8,10)}.${actual.slice(5,7)}.${actual.slice(0,4)} (kellaaeg puudub)`;
@@ -266,14 +315,24 @@ async function hydrateHistory(ctr,def){
 function reconcileCycle(){
   S.sessionChecked=new Set();if(!TC.cycle)return;
   for(const [id,link] of Object.entries(TC.cycle.entries||{})){
-    let r=link.kontrollId?TC.records.find(r=>r.syncId===link.kontrollId&&r.id===id):null;
-    if(!r)r=TC.records.find(r=>r.row===link.row&&r.id===id&&(!link.fingerprint||recordFingerprint(r)===link.fingerprint));
-    if(!r&&link.fingerprint)r=TC.records.find(r=>r.id===id&&recordFingerprint(r)===link.fingerprint);
-    if(r){link.row=r.row;link.fingerprint=recordFingerprint(r);if(r.syncId)link.kontrollId=r.syncId;S.sessionChecked.add(id);}
+    const linked=findCycleRecordByIds(id,link);
+    if(linked.ids.length){
+      if(linked.primary){link.row=linked.primary.row;link.fingerprint=recordFingerprint(linked.primary);}
+      if(linked.matched.length)S.sessionChecked.add(id);
+      reconcileCycleDefectLinks(id,link);
+      continue;
+    }
+    const legacy=findLegacyCycleRecord(id,link);
+    if(legacy){link.row=legacy.row;link.fingerprint=recordFingerprint(legacy);if(legacy.syncId)link.kontrollId=legacy.syncId;S.sessionChecked.add(id);}
   }
   S.ringStartedAt=TC.cycle.startedAt;
 }
-function savedEntry(id){const link=TC.cycle?.entries?.[id];if(!link)return null;return (link.kontrollId&&TC.records.find(r=>r.syncId===link.kontrollId&&r.id===id))||TC.records.find(r=>r.row===link.row&&r.id===id&&recordFingerprint(r)===link.fingerprint)||TC.records.find(r=>r.id===id&&recordFingerprint(r)===link.fingerprint)||null;}
+function savedEntry(id){
+  const link=TC.cycle?.entries?.[id];if(!link)return null;
+  const ids=cycleEntryControlIds(link);
+  if(ids.length){for(const controlId of ids){const record=TC.records.find(r=>r.syncId===controlId&&r.id===id);if(record)return record;}return null;}
+  return findLegacyCycleRecord(id,link);
+}
 function setBusy(value){TC.busy=value;document.body.classList.toggle('saving',value);}
 function semanticState(){
   return {
@@ -437,8 +496,10 @@ async function writeIncomingControl(op,fields,values){
   const fp=recordFingerprint({id:values.cabinetId,date:values.date,inspector:values.inspector,start:getCellVal(doc,'W',row)});
   if(TC.cycle&&values.cycleId===TC.cycle.id){
     const old=TC.cycle.entries[values.cabinetId];
-    if(!old||old.kontrollId===op.entityId||old.fingerprint===fp)TC.cycle.entries[values.cabinetId]={...(old||{}),row,fingerprint:fp,kontrollId:op.entityId,defectRows:old?.defectRows||[],note:values.note||old?.note||''};
-    else{const extra=new Set(old.additionalKontrollIds||[]);extra.add(op.entityId);TC.cycle.entries[values.cabinetId]={...old,additionalKontrollIds:[...extra]};}
+    const oldPrimary=persistentSyncId('Kontroll',old?.kontrollId),knownIds=cycleEntryControlIds(old);
+    if(!old||oldPrimary===op.entityId||(!oldPrimary&&!knownIds.length&&old.fingerprint===fp))TC.cycle.entries[values.cabinetId]={...(old||{}),row,fingerprint:fp,kontrollId:op.entityId,defectRows:old?.defectRows||[],note:values.note||old?.note||''};
+    else if(!oldPrimary){const additional=new Set(old.additionalKontrollIds||[]);additional.add(op.entityId);TC.cycle.entries[values.cabinetId]={...old,kontrollId:op.entityId,additionalKontrollIds:[...additional].filter(id=>id!==op.entityId),row,fingerprint:fp};}
+    else if(!knownIds.includes(op.entityId)){const additional=new Set([...(old.additionalKontrollIds||[]),op.entityId]);TC.cycle.entries[values.cabinetId]={...old,additionalKontrollIds:[...additional]};}
   }
 }
 async function writeIncomingDefect(op,fields,values){
@@ -511,6 +572,50 @@ async function persistWorkspace(){
   TC.localUsedAt=new Date().toISOString();
   const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
   await storeCall('put',snapshot);TC.startupLoaded=true;TC.startupSnapshot=snapshot;return bytes;
+}
+function comparableCycleStart(cycle){
+  const value=String(cycle?.startedAt||'').trim();if(!value)return'';
+  const normalized=value.replace(' ','T').replace(/Z$/,'');return normalized.length>=19?normalized.slice(0,19):normalized;
+}
+function cyclesShareKontroll(cycleA,cycleB){
+  for(const [cabinetId,entryA] of Object.entries(cycleA?.entries||{})){
+    const entryB=cycleB?.entries?.[cabinetId];if(!entryB)continue;
+    const a=new Set(cycleEntryControlIds(entryA));if(cycleEntryControlIds(entryB).some(id=>a.has(id)))return true;
+  }
+  return false;
+}
+function cyclesRepresentSameRound(cycleA,cycleB){
+  if(!cycleA||!cycleB)return false;
+  if(cycleA.id&&cycleB.id&&cycleA.id===cycleB.id)return true;
+  const a=comparableCycleStart(cycleA),b=comparableCycleStart(cycleB);
+  return (!!a&&a===b)||cyclesShareKontroll(cycleA,cycleB);
+}
+function mergeCycleEntry(localEntry,incomingEntry){
+  if(!localEntry)return cloneData(incomingEntry);
+  if(!incomingEntry)return cloneData(localEntry);
+  const merged={...cloneData(incomingEntry),...cloneData(localEntry)};
+  const localPrimary=persistentSyncId('Kontroll',localEntry.kontrollId),incomingPrimary=persistentSyncId('Kontroll',incomingEntry.kontrollId),primary=localPrimary||incomingPrimary;
+  if(primary)merged.kontrollId=primary;else delete merged.kontrollId;
+  const additional=new Set([...cycleEntryControlIds(localEntry),...cycleEntryControlIds(incomingEntry)]);additional.delete(primary);
+  if(incomingPrimary&&incomingPrimary!==primary)additional.add(incomingPrimary);
+  if(additional.size)merged.additionalKontrollIds=[...additional];else delete merged.additionalKontrollIds;
+  const previous={};
+  for(const source of [incomingEntry.previousControlDefects||{},localEntry.previousControlDefects||{}])for(const [controlId,rows] of Object.entries(source))previous[controlId]=[...new Set([...(previous[controlId]||[]),...(Array.isArray(rows)?rows:[])])];
+  if(Object.keys(previous).length)merged.previousControlDefects=previous;else delete merged.previousControlDefects;
+  merged.defectRows=[...new Set([...(incomingEntry.defectRows||[]),...(localEntry.defectRows||[])])];
+  if(localEntry.note)merged.note=localEntry.note;else if(incomingEntry.note)merged.note=incomingEntry.note;
+  return merged;
+}
+function mergeCurrentCycle(localCycle,incomingCycle){
+  if(!localCycle)return incomingCycle?cloneData(incomingCycle):null;
+  if(!incomingCycle)return cloneData(localCycle);
+  // A local unfinished cycle is the phone's active work. Merge a peer/export cycle only
+  // when shared cycle identity, start time, or permanent inspection IDs prove relation.
+  if(!cyclesRepresentSameRound(localCycle,incomingCycle))return cloneData(localCycle);
+  const entries={};
+  for(const cabinetId of new Set([...Object.keys(localCycle.entries||{}),...Object.keys(incomingCycle.entries||{})]))
+    entries[cabinetId]=mergeCycleEntry(localCycle.entries?.[cabinetId],incomingCycle.entries?.[cabinetId]);
+  return {...cloneData(incomingCycle),...cloneData(localCycle),id:localCycle.id||incomingCycle.id,startedAt:localCycle.startedAt||incomingCycle.startedAt,entries};
 }
 async function transaction(change,options={}){
   if(TC.busy||TC.exportPending)return false;setBusy(true);
@@ -609,7 +714,7 @@ async function importXlsx(ev,sourceBytes=null){
           }
         }
         if(!selectedInternal){
-          const mergedCycle=merged&&local.cycle&&cycle&&local.cycle.id===cycle.id?{...local.cycle,...cycle,entries:{...(local.cycle.entries||{}),...(cycle.entries||{})}}:(merged&&local.cycle&&!cycle?local.cycle:cycle);
+          const mergedCycle=merged?mergeCurrentCycle(local.cycle,cycle):cycle;
           chosenBytes=await importedZip.generateAsync({type:'uint8array'});chosenName=file.name;
           Object.assign(TC,{dbId:embedded?.dbId||local.dbId,registryKey:identity.key,registryTokens:identity.tokens,cycle:mergedCycle,sync:local.sync||embedded?.sync||null,guard:local.guard||{remaining:randomGap(),pending:null},revision:Math.max(Number(local.revision)||0,Number(embedded?.revision)||0),updatedAt:embedded?.updatedAt||local.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});
           S.inspector=embedded?.inspector||local.inspector||'';S.dirty=merged||!!local.dirty;
@@ -631,7 +736,17 @@ async function importXlsx(ev,sourceBytes=null){
 }
 function cycleFromRecords(records,startedAt){
   const cycle={id:uid(),startedAt:cycleStartFromRecords(records,startedAt),startSource:'records',entries:{}};
-  for(const r of records.sort((a,b)=>a.date.localeCompare(b.date)||a.row-b.row))cycle.entries[r.id]={row:r.row,fingerprint:recordFingerprint(r),defectRows:TC.allDefects.filter(d=>d.id===r.id&&d.date===r.date&&d.inspector===r.inspector).map(d=>d.row),note:''};return cycle;
+  const ordered=[...records].sort((a,b)=>a.date.localeCompare(b.date)||(realStartFromRecord(a)||'').localeCompare(realStartFromRecord(b)||'')||a.row-b.row);
+  const rowsForControl=r=>TC.allDefects.filter(d=>d.id===r.id&&(r.syncId&&d.kontrollId===r.syncId||!d.kontrollId&&d.date===r.date&&d.inspector===r.inspector)).map(d=>d.row);
+  for(const r of ordered){
+    const controlId=persistentSyncId('Kontroll',r.syncId||r.persistentId),defectRows=rowsForControl(r),old=cycle.entries[r.id];
+    if(!old){cycle.entries[r.id]={row:r.row,fingerprint:recordFingerprint(r),...(controlId?{kontrollId:controlId}:{}),defectRows,note:''};continue;}
+    const previousControlDefects={...(old.previousControlDefects||{})},oldPrimary=persistentSyncId('Kontroll',old.kontrollId);
+    if(oldPrimary&&oldPrimary!==controlId&&old.defectRows?.length)previousControlDefects[oldPrimary]=[...new Set([...(previousControlDefects[oldPrimary]||[]),...old.defectRows])];
+    const additional=new Set([...(old.additionalKontrollIds||[]),...(oldPrimary&&oldPrimary!==controlId?[oldPrimary]:[])]);if(controlId)additional.delete(controlId);
+    cycle.entries[r.id]={...old,row:r.row,fingerprint:recordFingerprint(r),...(controlId?{kontrollId:controlId}:{}),defectRows,...(additional.size?{additionalKontrollIds:[...additional]}:{}),...(Object.keys(previousControlDefects).length?{previousControlDefects}:{})};
+  }
+  return cycle;
 }
 function renderCyclePanel(){
   const box=$('cyclePanel');if(!box)return;

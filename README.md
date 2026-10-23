@@ -30,4 +30,6 @@ The headless controller and workbook regression suite passes **31/31** against t
 
 The suite uses a Node VM, XML/form adapter, and durable filesystem bridge. It is not Android/WebView or a physical two-phone test. Android SDK, Gradle, emulator, and adb were unavailable in this workspace; no APK has been built here. GitHub Actions, Android 16 startup/Share, signing compatibility, and the two-phone field guide still require device verification.
 
-The workbook guide's conflicting score semantics remain unresolved and unchanged.
+## Current inspection rating labels
+
+The inspection screen follows the approved workbook scale: blank = `Ei rakendu`, 0 = `Ei ole / puudub`, 1 = `Asendus puudub`, 2 = `Ajutised lahendused`, 3 = `Vajab uuendamist`, 4 = `Normi piires`, and 5 = `Uus ja korras`. Blank and 0 remain distinct stored values. The numeric H:R mapping and score calculations are unchanged.

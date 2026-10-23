@@ -797,7 +797,7 @@ function tickInspection(){if(!TC.opened)return;const sec=Math.floor(inspectionSe
 function startInspectionTimer(){stopInspectionTimer();tickInspection();S.inspectTimerHandle=setInterval(tickInspection,250);}
 function inspectionStamp(r){const time=excelClock(r?.start);return `${r?.date||'—'}${time?' '+time:''}`;}
 async function viewSavedInspection(id,record,entry){
-  const ratings=CHECKS.map(([col,label])=>`${esc(label)}: <b>${esc(record.ratings?.[col]||'—')}</b>`).join('<br>');
+  const ratings=CHECKS.map(([col,label])=>{const value=record.ratings?.[col]??'',shown=value===''?'–':String(value);return `${esc(label)}: <b>${esc(shown)} — ${esc(scoreLabel(value))}</b>`;}).join('<br>');
   const linkedRows=new Set(entry?.defectRows||[]),defects=TC.allDefects.filter(d=>d.id===id&&(linkedRows.has(d.row)||TC.sync?.entities?.Puudus?.[d.syncId]?.values?.kontrollId===record.syncId));
   const defectHtml=defects.length?defects.map(d=>`• ${esc(d.point||'Puudus')}: ${esc(d.desc||'')} — ${esc(d.closed?'Kõrvaldatud':'Avatud')}`).join('<br>'):'Puuduseid pole seotud';
   await showAppChoice('VAATA KONTROLLI',`<b>${esc(id)} • ${esc(cabinetTitle(S.selected))}</b><br>Kontrollitud: ${esc(inspectionStamp(record))}<br>Kontrollija: ${esc(record.inspector||'—')}<div class="topgap">${ratings}</div><div class="topgap"><b>Puudused (${defects.length})</b><br>${defectHtml}</div>`,[{value:'back',label:'TAGASI',primary:true}]);

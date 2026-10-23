@@ -28,7 +28,7 @@ textarea{min-height:88px;resize:vertical} .row{display:flex;gap:8px;align-items:
 .checkrow{padding:12px 0;border-bottom:1px solid #e7e9ed} .checkname{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;align-items:baseline} .checkname span{font-size:12px;color:var(--muted);text-align:right}
 .scorebar{display:grid;grid-template-columns:repeat(7,1fr);gap:5px} .scorebar button{padding:11px 4px;border-radius:9px} .scorebar button.active{outline:3px solid #26364a;outline-offset:-2px;font-weight:800}
 .scorebar .clear.active{background:#e8ebef}.score.s0{background:#eef1f4}.score.s1{background:#ffd9d5}.score.s2{background:#ffe7c7}.score.s3{background:#fff2bd}.score.s4{background:#dff2e5}.score.s5{background:#c7ecd2}.score.s0.active{background:#d9dde3}.score.s1.active{background:#ffbcb5}.score.s2.active{background:#ffd29a}.score.s3.active{background:#ffe67a}.score.s4.active{background:#bce3c7}.score.s5.active{background:#92d4a7}
-.legendgrid{display:grid;grid-template-columns:1fr;gap:7px;margin:10px 0 6px}.legenditem{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.legenditem b{min-width:18px}.swatch{width:16px;height:16px;border-radius:5px;border:1px solid rgba(0,0,0,.08)}.swatch.s0{background:#eef1f4}.swatch.s1{background:#ffd9d5}.swatch.s2{background:#ffe7c7}.swatch.s3{background:#fff2bd}.swatch.s4{background:#dff2e5}.swatch.s5{background:#c7ecd2}.gradehelp{margin-top:6px}.gradehelp .legenditem{padding:7px 10px}.legendhead{font-weight:700;margin-top:8px}.legendhint{color:var(--muted);font-size:12px;margin-top:4px}
+.legendgrid{display:grid;grid-template-columns:1fr;gap:7px;margin:10px 0 6px}.legenditem{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:11px;background:#fff}.legenditem b{min-width:18px}.swatch{width:16px;height:16px;border-radius:5px;border:1px solid rgba(0,0,0,.08)}.swatch.sblank,.swatch.s0{background:#eef1f4}.swatch.s1{background:#ffd9d5}.swatch.s2{background:#ffe7c7}.swatch.s3{background:#fff2bd}.swatch.s4{background:#dff2e5}.swatch.s5{background:#c7ecd2}.gradehelp{margin-top:6px}.gradehelp .legenditem{padding:7px 10px}.legendhead{font-weight:700;margin-top:8px}.legendhint{color:var(--muted);font-size:12px;margin-top:4px}
 .avg{font-size:24px;font-weight:800} .miniDef{border:1px solid #efc1bc;background:#fff6f5;border-radius:11px;padding:10px;margin:8px 0} .tiny{padding:3px 9px;border-radius:8px}
 .defectedit{border-color:#e6a6a0} .stickySave{position:sticky;bottom:0;background:linear-gradient(transparent,var(--bg) 28%);padding-top:18px;padding-bottom:max(4px,env(safe-area-inset-bottom))}
 .stickySave button{width:100%;padding:15px;font-weight:750}
@@ -213,20 +213,13 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
    <button onclick="saveCabinetStatus()">SALVESTA STAATUS</button>
   </div>
   <div class="topgap"><span class="timerpill">Kontrolli aeg: <span id="inspectionTimer">00:00</span></span><div id="minimumFeedback" class="small topgap"></div><div id="presenceFeedback" class="topgap"></div></div>
-  <div class="space" style="margin-top:14px"><div><b>Kontrollpunktid</b><div class="small">– = täitmata, 0 = Ei ole / puudub. Keskmine kasutab ainult 1–5. Hinne 1–3 ilma puuduseta annab hoiatuse.</div></div><div>Keskmine <span id="avgScore" class="avg">–</span></div></div>
+  <div class="space" style="margin-top:14px"><div><b>Kontrollpunktid</b><div id="scoreHint" class="small"></div><div class="small">Keskmine kasutab ainult 1–5. Hinne 1–3 ilma puuduseta annab hoiatuse.</div></div><div>Keskmine <span id="avgScore" class="avg">–</span></div></div>
   <div class="row" style="margin:10px 0 4px">
    <button class="quick5" onclick="setAllScores(5)">Kõik 5</button>
    <button onclick="clearAllScores()">Tühjenda</button>
   </div>
   <div class="legendhead">Hinnete tähendus</div>
-  <div class="legendgrid">
-   <div class="legenditem"><span class="swatch s0"></span><b>0</b><span>Ei ole / puudub</span></div>
-   <div class="legenditem"><span class="swatch s1"></span><b>1</b><span>Väga halb - kohe parandada</span></div>
-   <div class="legenditem"><span class="swatch s2"></span><b>2</b><span>Halb - kiire parandus</span></div>
-   <div class="legenditem"><span class="swatch s3"></span><b>3</b><span>Vajab parandamist / uuendamist</span></div>
-   <div class="legenditem"><span class="swatch s4"></span><b>4</b><span>Korras</span></div>
-   <div class="legenditem"><span class="swatch s5"></span><b>5</b><span>Väga hea / uus</span></div>
-  </div>
+  <div id="scoreLegend" class="legendgrid"></div>
   <div id="ratings"></div>
   <label>Märkus kontrolli kohta</label><textarea id="inspectComment" placeholder="Vabatahtlik märkus. Säilib kontrolli andmetes ja eksporditud töövihiku metaandmetes."></textarea>
   <hr>
@@ -358,14 +351,15 @@ const CHECKS = [
  ["R","Ohutus","Ohutusahelad"]
 ];
 
-const SCORE_INFO = {
+const SCORE_INFO = Object.freeze({
+ "":"Ei rakendu",
  "0":"Ei ole / puudub",
- "1":"Väga halb - kohe parandada",
- "2":"Halb - kiire parandus",
- "3":"Vajab parandamist / uuendamist",
- "4":"Korras",
- "5":"Väga hea / uus"
-};
+ "1":"Asendus puudub",
+ "2":"Ajutised lahendused",
+ "3":"Vajab uuendamist",
+ "4":"Normi piires",
+ "5":"Uus ja korras"
+});
 
 const GRADE_INFO = {
  "A":"Vahetu oht",
@@ -374,7 +368,7 @@ const GRADE_INFO = {
  "D":"Märkus"
 };
 
-function scoreLabel(v){ return SCORE_INFO[String(v)] || ""; }
+function scoreLabel(v){const key=v==null||String(v)===""?"":String(v);return Object.prototype.hasOwnProperty.call(SCORE_INFO,key)?SCORE_INFO[key]:"";}
 function gradeLabel(v){ return GRADE_INFO[String(v)] || ""; }
 
 function $(id){return document.getElementById(id)}
@@ -684,6 +678,8 @@ function backToList(){
 }
 
 function renderRatings(){
+ $("scoreLegend").innerHTML=Object.entries(SCORE_INFO).map(([value,label])=>{const blank=value==="",mark=blank?"–":value,swatch=blank?"sblank":"s"+value;return `<div class="legenditem"><span class="swatch ${swatch}"></span><b>${mark}</b><span>${esc(label)}</span></div>`}).join("");
+ $("scoreHint").textContent=`– = ${scoreLabel("")}, 0 = ${scoreLabel(0)}.`;
  $("ratings").innerHTML=CHECKS.map(([col,short,long])=>`<div class="checkrow">
    <div class="checkname"><b>${esc(short)}</b><span>${esc(long)}</span></div>
    <div class="scorebar">
@@ -696,7 +692,7 @@ function setScore(col,v){
  if(String(v)==="0" && String(S.ratings[col]||"")!=="0"){
    const item=CHECKS.find(x=>x[0]===col);
    const name=item?item[1]:col;
-   if(!confirm(name+"\n\n0 = Ei ole / puudub.\nSee väärtus ei lähe keskmise hinde sisse.\n\nKas määrata 0?"))return;
+   if(!confirm(name+"\n\n0 = "+scoreLabel(0)+".\nSee väärtus ei lähe keskmise hinde sisse.\n\nKas määrata 0?"))return;
  }
  S.ratings[col]=String(v);
  renderRatings();

@@ -12,6 +12,10 @@ const WORK_PACKAGE_MIME='application/vnd.dold.techcontrol.workpackage';
 const SYNC_PACKAGE_MIME='application/vnd.dold.techcontrol.syncpackage';
 const APP_VERSION='0.5.6.1';
 const cloneData=v=>JSON.parse(JSON.stringify(v));
+function persistentSyncId(type,value){
+  const prefixes={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-',Cabinet:'dtc-cabinet-'},prefix=prefixes[type],id=String(value??'').trim();
+  return prefix&&id.startsWith(prefix)&&/^[A-Za-z0-9_-]{1,180}$/.test(id.slice(prefix.length))?id:'';
+}
 let appDialogResolve=null;
 function cloneWorkbook(zip){const copy=zip.clone();copy.files={...zip.files};return copy;}
 function uid(){const a=new Uint32Array(4);crypto.getRandomValues(a);return [...a].map(n=>n.toString(16).padStart(8,'0')).join('');}
@@ -32,9 +36,11 @@ function syncControlValues(r){
 }
 function syncDefectValues(d){
   const values={cabinetId:d.id,date:d.date,inspector:d.inspector,cabinetTitle:d.cabinetTitle||'',location:d.location||'',point:d.point||'',description:d.desc||'',priority:d.grade||'',repeat:d.repeat||'',owner:d.owner||'',due:d.due||'',repairer:d.repairer||'',closedAt:d.closedAt||'',repairAction:d.repairAction||'',lastCheckedBy:d.lastCheckedBy||''};
-  const link=TC.cycle?.entries?.[d.id],priorControlId=Object.entries(link?.previousControlDefects||{}).find(([,rows])=>rows?.includes(d.row))?.[0];
-  const controlId=link?.defectRows?.includes(d.row)?(link.kontrollId||TC.records.find(r=>r.row===link.row&&r.id===d.id&&recordFingerprint(r)===link.fingerprint)?.syncId):priorControlId;
-  if(link&&controlId){values.cycleId=TC.cycle.id;values.kontrollId=controlId;}
+  const link=TC.cycle?.entries?.[d.id],priorControlId=Object.entries(link?.previousControlDefects||{}).find(([,rows])=>rows?.includes(d.row))?.[0],belongsToCycle=!!(link?.defectRows?.includes(d.row)||priorControlId);
+  const cycleControlId=link?.defectRows?.includes(d.row)?(link.kontrollId||TC.records.find(r=>r.row===link.row&&r.id===d.id&&recordFingerprint(r)===link.fingerprint)?.syncId):priorControlId;
+  const controlId=d.kontrollId||cycleControlId;
+  if(controlId)values.kontrollId=controlId;
+  if(link&&belongsToCycle)values.cycleId=TC.cycle.id;
   return values;
 }
 function syncCabinetValues(c){return {cabinetId:c.id,status:c.status||''};}
@@ -51,8 +57,10 @@ async function ensureSyncState(){
     for(const [base,list] of groups){
       list.sort((a,b)=>syncCanonical(valuesOf(a)).localeCompare(syncCanonical(valuesOf(b))));
       for(let i=0;i<list.length;i++){
-        const item=list[i],row=String(item.row),pending=TC.pendingSyncRowIds?.[type]?.[row];
-        let key=base+'#'+(i+1),entityId=pending||Object.keys(entities).find(id=>!used.has(id)&&entities[id]?.key===key);
+        const item=list[i],row=String(item.row),pending=TC.pendingSyncRowIds?.[type]?.[row],persistentId=persistentSyncId(type,item.persistentId);
+        if(persistentId&&pending&&persistentId!==pending)throw Error('Tööfaili püsiv ID ei klapi sünkroonitud kirje ID-ga.');
+        if(persistentId&&used.has(persistentId))throw Error('Tööfailis kordub püsiv kirje ID: '+persistentId);
+        let key=base+'#'+(i+1),entityId=persistentId||pending||Object.keys(entities).find(id=>!used.has(id)&&entities[id]?.key===key);
         if(entityId&&used.has(entityId))entityId=null;
         if(!entityId&&TC.pendingSyncRowIds)entityId=`dtc-${type.toLowerCase()}-new-${TC.deviceId.slice(-8)}-${uid()}`;
         if(!entityId){const seed=`${TC.dbId}|${type}|${key}`;entityId=`dtc-${type.toLowerCase()}-${(await digest(new TextEncoder().encode(seed))).slice(0,32)}`;if(used.has(entityId)){let n=i+1;do{key=base+'#'+(++n);entityId=`dtc-${type.toLowerCase()}-${(await digest(new TextEncoder().encode(`${TC.dbId}|${type}|${key}`))).slice(0,32)}`;}while(used.has(entityId));}}
@@ -239,8 +247,14 @@ async function registryIdentity(){
 }
 function recordFingerprint(r){return [r.id,r.date,r.inspector,String(r.start)].join('|');}
 async function hydrateHistory(ctr,def){
-  TC.records=qsa(ctr,'row').map(x=>Number(x.getAttribute('r'))).filter(r=>r>=5&&getCellVal(ctr,'B',r)).map(row=>({row,id:getCellVal(ctr,'B',row).trim(),date:excelDateToIso(getCellVal(ctr,'A',row)),inspector:getCellVal(ctr,'D',row).trim(),start:getCellVal(ctr,'W',row),end:getCellVal(ctr,'X',row),duration:Number(getCellVal(ctr,'Y',row))||0,exception:getCellVal(ctr,'Z',row),ratings:Object.fromEntries(CHECKS.map(([col])=>[col,getCellVal(ctr,col,row)]))}));
-  TC.allDefects=qsa(def,'row').map(x=>Number(x.getAttribute('r'))).filter(r=>r>=5&&getCellVal(def,'B',r)).map(row=>({row,id:getCellVal(def,'B',row).trim(),date:excelDateToIso(getCellVal(def,'A',row)),inspector:getCellVal(def,'E',row),cabinetTitle:getCellVal(def,'C',row),location:getCellVal(def,'D',row),point:getCellVal(def,'F',row),desc:getCellVal(def,'G',row),grade:getCellVal(def,'H',row),repeat:getCellVal(def,'I',row),owner:getCellVal(def,'J',row),due:excelDateToIso(getCellVal(def,'K',row)),repairer:getCellVal(def,'L',row),closedAt:getCellVal(def,'M',row),repairAction:getCellVal(def,'O',row),lastCheckedBy:getCellVal(def,'P',row),closed:!!getCellVal(def,'M',row)}));
+  TC.records=qsa(ctr,'row').map(x=>Number(x.getAttribute('r'))).filter(r=>r>=5&&getCellVal(ctr,'B',r)).map(row=>{
+    const persistentId=persistentSyncId('Kontroll',getCellVal(ctr,'AA',row));
+    return {row,id:getCellVal(ctr,'B',row).trim(),date:excelDateToIso(getCellVal(ctr,'A',row)),inspector:getCellVal(ctr,'D',row).trim(),start:getCellVal(ctr,'W',row),end:getCellVal(ctr,'X',row),duration:Number(getCellVal(ctr,'Y',row))||0,exception:getCellVal(ctr,'Z',row),persistentId,syncId:persistentId,ratings:Object.fromEntries(CHECKS.map(([col])=>[col,getCellVal(ctr,col,row)]))};
+  });
+  TC.allDefects=qsa(def,'row').map(x=>Number(x.getAttribute('r'))).filter(r=>r>=5&&getCellVal(def,'B',r)).map(row=>{
+    const persistentId=persistentSyncId('Puudus',getCellVal(def,'S',row)),linkStatus=String(getCellVal(def,'U',row)||'').trim(),kontrollId=persistentSyncId('Kontroll',getCellVal(def,'T',row));
+    return {row,id:getCellVal(def,'B',row).trim(),date:excelDateToIso(getCellVal(def,'A',row)),inspector:getCellVal(def,'E',row),cabinetTitle:getCellVal(def,'C',row),location:getCellVal(def,'D',row),point:getCellVal(def,'F',row),desc:getCellVal(def,'G',row),grade:getCellVal(def,'H',row),repeat:getCellVal(def,'I',row),owner:getCellVal(def,'J',row),due:excelDateToIso(getCellVal(def,'K',row)),repairer:getCellVal(def,'L',row),closedAt:getCellVal(def,'M',row),repairAction:getCellVal(def,'O',row),lastCheckedBy:getCellVal(def,'P',row),persistentId,syncId:persistentId,kontrollId,linkStatus,linkBasis:String(getCellVal(def,'V',row)||'').trim(),legacyUnresolved:!persistentId&&linkStatus.toUpperCase()==='UNRESOLVED',closed:!!getCellVal(def,'M',row)};
+  });
   for(const c of S.cabinets){
     const latest=TC.records.filter(r=>r.id===c.id&&r.date).sort((a,b)=>b.date.localeCompare(a.date)||b.row-a.row)[0];
     if(latest&&(!c.lastDate||latest.date>=c.lastDate)){c.lastDate=latest.date;c.lastInspector=latest.inspector;/* Keep configured historical interval when available. */if(!c.nextDate||c.nextDate<=latest.date)c.nextDate=plusDays(latest.date,120);}

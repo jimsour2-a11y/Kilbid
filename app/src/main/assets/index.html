@@ -40,6 +40,12 @@ textarea{min-height:88px;resize:vertical} .row{display:flex;gap:8px;align-items:
 .qrstart{text-align:center}.qrbutton{width:100%;font-size:17px;font-weight:800;padding:14px;margin-bottom:7px}
 .qrmodal{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:80;padding:18px;display:flex;align-items:center;justify-content:center}
 .qrpanel{background:#fff;border-radius:16px;padding:14px;width:min(620px,100%);max-height:94vh;overflow:auto}
+.appdialog{position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:max(12px,env(safe-area-inset-top,0px)) 12px max(12px,env(safe-area-inset-bottom,0px))}
+.app-dialog-card{width:min(560px,100%);max-height:min(85vh,calc(100vh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 24px));display:flex;flex-direction:column;overflow:hidden;min-height:0;background:var(--card)}
+.app-dialog-header{flex:0 0 auto}
+.app-dialog-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.app-dialog-actions{flex:0 0 auto;max-height:30vh;overflow-y:auto;justify-content:flex-end;flex-wrap:wrap;background:var(--card);padding-top:12px}
+@supports (height:100dvh){.app-dialog-card{max-height:min(85dvh,calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px) - 24px))}.app-dialog-actions{max-height:30dvh}}
 .videoWrap{position:relative;background:#111;border-radius:13px;overflow:hidden;margin:12px 0;aspect-ratio:3/4}
 #qrVideo{width:100%;height:100%;object-fit:cover}
 .scanFrame{position:absolute;left:15%;right:15%;top:26%;aspect-ratio:1/1;border:3px solid #fff;border-radius:14px;box-shadow:0 0 0 999px rgba(0,0,0,.18)}
@@ -303,11 +309,11 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
  </div>
 </div>
 <div id="toast"></div>
-<div id="appDialog" class="hidden" role="dialog" aria-modal="true" style="position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.58);display:flex;align-items:center;justify-content:center;padding:18px">
- <div class="card" style="width:min(560px,100%);max-height:85vh;overflow:auto;background:var(--card)">
-  <div class="big" id="appDialogTitle"></div>
-  <div id="appDialogBody" class="small topgap"></div>
-  <div id="appDialogActions" class="row topgap" style="justify-content:flex-end;flex-wrap:wrap"></div>
+<div id="appDialog" class="appdialog hidden" role="dialog" aria-modal="true">
+ <div class="card app-dialog-card">
+  <div class="big app-dialog-header" id="appDialogTitle"></div>
+  <div id="appDialogBody" class="small topgap app-dialog-body"></div>
+  <div id="appDialogActions" class="row topgap app-dialog-actions"></div>
  </div>
 </div>
 

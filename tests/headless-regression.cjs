@@ -24,6 +24,7 @@ class XmlNode{
 }
 class Parser{parseFromString(s){return new XmlNode(XML.xml2js(s,{compact:false,alwaysChildren:false}));}}
 class Serializer{serializeToString(d){return XML.js2xml(d.toData(),{compact:false});}}
+async function workbookSheetNames(zip){const doc=new Parser().parseFromString(await zip.file('xl/workbook.xml').async('string'));return doc.getElementsByTagNameNS('*','sheet').map(s=>s.getAttribute('name')).sort();}
 const root=path.resolve(__dirname,'..'),fixture=process.argv[2],out=path.resolve(process.argv[3]||'/tmp/dold-tests');
 if(!fixture)throw Error('Pass a real XLSX fixture path');fs.mkdirSync(out,{recursive:true});
 const html=fs.readFileSync(path.join(root,'app/src/main/assets/index.html'),'utf8');
@@ -85,7 +86,7 @@ async function freshWorkspace(label,bytes){const dir=path.join(out,label);fs.rmS
 async function saveTestInspection(id,desc=''){await run('openCab('+JSON.stringify(id)+')');el('inspector').value='Stage 12 tester';run('setAllScores(4)');if(desc)run(`S.stagedDefects=[{point:'Stage 12',desc:${JSON.stringify(desc)},grade:'C',repeat:'Ei',owner:'Stage 12 tester',due:plusDays(today(),30)}]`);advance(61);await run('saveInspection()');}
 const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),r1Setup=testFilter.includes('r1 package')&&name.startsWith('A import');if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!r1Setup&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!r1Setup)results.push({name,status:'PASS'});console.log(r1Setup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
 (async()=>{
-const bytes=fs.readFileSync(fixture);const original=await JSZip.loadAsync(bytes);let initialRows,initialDefects,id,other,firstRow,firstStart,cycleId;
+const bytes=fs.readFileSync(fixture);const original=await JSZip.loadAsync(bytes);const originalSheetNames=await workbookSheetNames(original);let initialRows,initialDefects,id,other,firstRow,firstStart,cycleId;
 await test('A import current workbook, dynamic active count, reserve IDs hidden',async()=>{
  await importBytes(bytes);if(alerts.length)throw Error(alerts.join('\n'));const stats=run(`({total:S.cabinets.length,active:activeCabinets().length,people:S.people,ids:S.cabinets.map(c=>c.id)})`);assert(stats.total>250);assert(!stats.ids.includes('EK-400'));console.log('INPUT',stats.total,stats.active);initialRows=await count('Kontrollid');initialDefects=await count('Puudused');id=run('activeCabinets().find(c=>!c.lastDate)?.id||activeCabinets()[0].id');other=run('activeCabinets().find(c=>c.id!=='+JSON.stringify(id)+').id');await run('resetRingProgress()');cycleId=run('TC.cycle.id');assert.equal(el('progressTxt').textContent,'0 / '+stats.active);
 });
@@ -129,7 +130,7 @@ await test('L timestamp export metadata restores full cycle from external copy',
 await test('M original ZIP parts/sheets/formulas retained; numeric duration',async()=>{
  const result=await JSZip.loadAsync(fs.readFileSync(path.join(out,'exported.xlsx')));for(const name of Object.keys(original.files)){assert(result.files[name],'Missing ZIP entry '+name);}
  const allowed=new Set(['docProps/custom.xml','[Content_Types].xml','_rels/.rels','xl/workbook.xml','xl/styles.xml',run('S.paths.Kontrollid'),run('S.paths.Puudused'),run("S.paths['Kokkuvõte']")]);for(const name of Object.keys(original.files)){if(original.files[name].dir||allowed.has(name))continue;assert((await original.file(name).async('nodebuffer')).equals(await result.file(name).async('nodebuffer')),'Unexpected change '+name);}
- const d=await run("loadDoc('Kontrollid')");const y=env.cx;assert(run('savedEntry('+JSON.stringify(id)+').duration>=60/86400'));assert.equal(run('Object.keys(S.paths).length'),8);
+ const resultSheetNames=await workbookSheetNames(result);assert.deepStrictEqual(resultSheetNames,originalSheetNames,'Workbook sheet-name set changed');assert(run('savedEntry('+JSON.stringify(id)+').duration>=60/86400'));assert.equal(run('Object.keys(S.paths).length'),originalSheetNames.length);
 });
 await test('Unknown future sheet added externally survives reimport with pending local work',async()=>{
  const incoming=await JSZip.loadAsync(bytes);

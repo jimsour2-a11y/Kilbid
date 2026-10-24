@@ -922,27 +922,70 @@ await test('R3 legacy cycle adopts a unique no-AA record and then remains stable
   assert.equal(run('S.sessionChecked.size'),1);assert.equal(run(`savedEntry(${JSON.stringify(cabinet)}).syncId`),migrated);assert.equal(run(`TC.cycle.entries[${JSON.stringify(cabinet)}].kontrollId`),migrated);assert.equal(run(`TC.cycle.entries[${JSON.stringify(cabinet)}].row`),changed.newRow);
  }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
-await test('S1 signature capture launches from a saved Kontroll and freezes only a known semantic version',async()=>{
- const record=JSON.parse(JSON.stringify(run('TC.records.find(r=>r.persistentId&&r.syncId)')));assert(record?.syncId,'Fixture needs a persistent KontrollID');
- run(`S.selected=S.cabinets.find(c=>c.id===${JSON.stringify(record.id)})`);
- run(`TC.sync.entities.Kontroll[${JSON.stringify(record.syncId)}].revision=4;TC.sync.entities.Kontroll[${JSON.stringify(record.syncId)}].values=syncControlValues(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);
- const exact=run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);assert.equal(exact.recordVersion,4);assert.equal(exact.recordVersionSource,'SEMANTIC_REVISION_SCHEMA1');
- const savedRevision=run('TC.revision'),savedRows=run('TC.records.length');const dialog=run(`viewSavedInspection(${JSON.stringify(record.id)},${JSON.stringify(record)},{})`);
- assert.equal(el('appDialogTitle').textContent,'VAATA KONTROLLI');assert(el('appDialogActions').innerHTML.includes('ALLKIRJA MUSTAND'));
- run("appDialogChoice('signature')");await dialog;const payload=env.signatureStartCalls.pop();assert(payload,'native capture bridge was not called');
- assert.equal(payload.targetType,'Kontroll');assert.equal(payload.recordId,record.syncId);assert.equal(payload.kilpId,record.id);assert.equal(payload.signerName,record.inspector);
- assert.equal(payload.recordVersion,4);assert.equal(payload.recordVersionSource,'SEMANTIC_REVISION_SCHEMA1');assert.equal(payload.metadata.workbookIdentity,run('TC.dbId'));
- assert.equal(payload.deviceInstanceId,run('TC.deviceId'));assert.equal(run('TC.revision'),savedRevision);assert.equal(run('TC.records.length'),savedRows);
+await test('S1 signature capture launches from a saved Kontroll and freezes its metadata snapshot version',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};try{
+  const signatureBytes=process.env.DTC_S1_5_SIGNATURE_FIXTURE?fs.readFileSync(process.env.DTC_S1_5_SIGNATURE_FIXTURE):bytes;await freshWorkspace('s1-signature-launch',signatureBytes);
+  const record=JSON.parse(JSON.stringify(run('TC.records.find(r=>r.persistentId&&r.syncId)')));assert(record?.syncId,'Fixture needs a persistent KontrollID');
+  run(`S.selected=S.cabinets.find(c=>c.id===${JSON.stringify(record.id)})`);
+  const exact=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);assert(Number.isInteger(exact.recordVersion)&&exact.recordVersion>=1);assert.equal(exact.recordVersionSource,'KONTROLL_SNAPSHOT_METADATA_V1');assert.match(exact.recordVersionSnapshotHash,/^[a-f0-9]{64}$/);
+  const savedRevision=run('TC.revision'),savedRows=run('TC.records.length');const dialog=run(`viewSavedInspection(${JSON.stringify(record.id)},${JSON.stringify(record)},{})`);
+  assert.equal(el('appDialogTitle').textContent,'VAATA KONTROLLI');assert(el('appDialogActions').innerHTML.includes('ALLKIRJA MUSTAND'));
+  run("appDialogChoice('signature')");await dialog;const payload=env.signatureStartCalls.pop();assert(payload,'native capture bridge was not called');
+  assert.equal(payload.targetType,'Kontroll');assert.equal(payload.recordId,record.syncId);assert.equal(payload.kilpId,record.id);assert.equal(payload.signerName,record.inspector);
+  assert.equal(payload.recordVersion,exact.recordVersion);assert.equal(payload.recordVersionSource,'KONTROLL_SNAPSHOT_METADATA_V1');assert.equal(payload.metadata.recordVersionSnapshotHash,exact.recordVersionSnapshotHash);assert.equal(payload.metadata.workbookIdentity,run('TC.dbId'));
+  assert.equal(payload.deviceInstanceId,run('TC.deviceId'));assert.equal(run('TC.revision'),savedRevision+1);assert.equal(run('TC.records.length'),savedRows);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
-await test('S1 signature leaves Kontroll version unresolved when semantic values differ and never invents version one',async()=>{
- const record=run('TC.records.find(r=>r.persistentId&&r.syncId)');assert(record,'Fixture needs a persistent Kontroll record');const id=record.syncId;
- run(`TC.sync.entities.Kontroll[${JSON.stringify(id)}].revision=4;TC.sync.entities.Kontroll[${JSON.stringify(id)}].values={...syncControlValues(TC.records.find(r=>r.syncId===${JSON.stringify(id)})),inspector:'different stored inspector'}`);
- const result=run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(id)}))`);assert.equal(result.recordVersion,null);assert.equal(result.recordVersionSource,'UNRESOLVED');
- run(`startDoldParandusSignatureDraft({recordId:'dtc-work-test-6cc420fc-8ee7-40a2-9a48-0f458b398e8f',kilpId:'EK-027',signerName:'Test signer',recordVersion:0,puudusId:'dtc-puudus-test',kontrollId:${JSON.stringify(id)}})`);
- const payload=env.signatureStartCalls.pop();assert.equal(payload.targetType,'Parandus');assert.equal(payload.recordId,'dtc-work-test-6cc420fc-8ee7-40a2-9a48-0f458b398e8f');assert.equal(payload.recordVersion,null);assert.equal(payload.recordVersionSource,'UNRESOLVED');
- assert.equal(payload.metadata.puudusId,'dtc-puudus-test');assert.equal(payload.metadata.kontrollId,id);
+await test('S1.5 Kontroll recordVersion survives restart and XLSX roundtrip, uses ID after row move, and advances on signed-field edit',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};try{
+  const signatureBytes=process.env.DTC_S1_5_SIGNATURE_FIXTURE?fs.readFileSync(process.env.DTC_S1_5_SIGNATURE_FIXTURE):bytes;await freshWorkspace('s1-5-control-version',signatureBytes);
+  const original=JSON.parse(JSON.stringify(run('TC.records.find(r=>r.persistentId&&r.syncId)')));assert(original,'Fixture needs a persistent KontrollID');
+  const first=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(original.syncId)}))`);assert(Number.isInteger(first.recordVersion)&&first.recordVersion>=1);
+  const second=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(original.syncId)}))`);assert.equal(second.recordVersion,first.recordVersion);
+  const exported=Buffer.from(await run('persistWorkspace()'));
+  env=makeContext();await run('TC.startupTask');
+  const afterRestart=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(original.syncId)}))`);assert.equal(afterRestart.recordVersion,first.recordVersion);
+  await importBytes(exported,'s1_5_same_workbook_export.xlsx','incoming');
+  const afterImport=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(original.syncId)}))`);assert.equal(afterImport.recordVersion,first.recordVersion);
+  const moved=await run(`(async()=>{const doc=await loadDoc('Kontrollid'),id=${JSON.stringify(original.syncId)},row=TC.records.find(r=>r.syncId===id).row,node=qsa(doc,'row').find(x=>Number(x.getAttribute('r'))===row),newRow=row+10000;node.setAttribute('r',String(newRow));for(const cell of qsa(node,'c'))cell.setAttribute('r',refCol(cell.getAttribute('r'))+newRow);S.zip.file(S.paths.Kontrollid,xmlStr(doc));return {newRow,bytes:await S.zip.generateAsync({type:'uint8array'})};})()`);
+  const stale=JSON.parse(JSON.stringify(run(`TC.records.find(r=>r.syncId===${JSON.stringify(original.syncId)})`)));assert.notEqual(stale.row,moved.newRow);
+  env.cx.s1MovedBytes=new Uint8Array(moved.bytes);await run('loadBook(s1MovedBytes,"row_moved_only.xlsx")');
+  const afterMove=await run(`draftKontrollRecordVersion(${JSON.stringify(stale)})`);assert.equal(afterMove.recordVersion,first.recordVersion,'row movement alone must not change the signed record version');
+  const changed=await run(`(async()=>{const doc=await loadDoc('Kontrollid'),id=${JSON.stringify(original.syncId)},row=${moved.newRow},old=getCellVal(doc,'H',${moved.newRow}),next=(Number(old)||0)+1;setNum(doc,'H',row,next);S.zip.file(S.paths.Kontrollid,xmlStr(doc));return {old,bytes:await S.zip.generateAsync({type:'uint8array'})};})()`);
+  env.cx.s1MovedBytes=new Uint8Array(changed.bytes);await run('loadBook(s1MovedBytes,"signed_score_edited.xlsx")');
+  const advanced=await run(`draftKontrollRecordVersion(${JSON.stringify(stale)})`);assert.equal(advanced.recordVersion,first.recordVersion+1);assert.equal(advanced.recordVersionSource,'KONTROLL_SNAPSHOT_METADATA_V1');
+  const stableAgain=await run(`draftKontrollRecordVersion(${JSON.stringify(stale)})`);assert.equal(stableAgain.recordVersion,advanced.recordVersion);
+  assert.equal(run(`TC.records.filter(r=>r.syncId===${JSON.stringify(original.syncId)}).length`),1);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
-await test('S1 signature draft list is local-only and does not invoke workbook writes',async()=>{
+await test('S1.5 legacy Kontroll without persistent AA stays UNRESOLVED and never invents version one',async()=>{
+ const legacyPath=process.env.DTC_R3_LEGACY_FIXTURE;if(!legacyPath)throw Error('Set DTC_R3_LEGACY_FIXTURE to the supplied v1.1 legacy workbook');
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};try{
+  await freshWorkspace('s1-5-legacy-version',fs.readFileSync(legacyPath));
+  const record=run('TC.records.find(r=>!r.persistentId&&r.syncId)');assert(record,'Fixture needs a legacy Kontroll row without AA');
+  const result=await run(`draftKontrollRecordVersion(${JSON.stringify(record)})`);assert.equal(result.recordVersion,null);assert.equal(result.recordVersionSource,'UNRESOLVED');
+  run(`startDoldParandusSignatureDraft({recordId:'dtc-work-test-6cc420fc-8ee7-40a2-9a48-0f458b398e8f',kilpId:'EK-027',signerName:'Test signer',recordVersion:0,puudusId:'dtc-puudus-test',kontrollId:${JSON.stringify(record.syncId)}})`);
+  const payload=env.signatureStartCalls.pop();assert.equal(payload.targetType,'Parandus');assert.equal(payload.recordId,'dtc-work-test-6cc420fc-8ee7-40a2-9a48-0f458b398e8f');assert.equal(payload.recordVersion,null);assert.equal(payload.recordVersionSource,'UNRESOLVED');
+  assert.equal(payload.metadata.puudusId,'dtc-puudus-test');assert.equal(payload.metadata.kontrollId,record.syncId);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('S1.5 production target and effective-status formulas require unique ID and type-preserving snapshot equality',async()=>{
+ const kontrollTarget=run('signatureTargetFormula("Kontroll",5)'),parandusTarget=run('signatureTargetFormula("Parandus",6)'),kontrollStatus=run('signatureEffectiveStatusFormula("Kontroll",5)'),parandusStatus=run('signatureEffectiveStatusFormula("Parandus",6)');
+ fs.writeFileSync(path.join(out,'s1-5-signature-formulas.json'),JSON.stringify({kontrollTarget,parandusTarget,kontrollStatus,parandusStatus},null,2));
+ assert(kontrollTarget.includes('COUNTIF(Kontrollid!$AA$5:$AA$500,$C5)=1'));assert(kontrollTarget.includes('MATCH($C5,Kontrollid!$AA$5:$AA$500,0)'));
+ assert(parandusTarget.includes('COUNTIF(Parandused!$A$5:$A$500,$C6)=1'));assert(parandusTarget.includes('MATCH($C6,Parandused!$A$5:$A$500,0)'));
+ assert(kontrollStatus.includes('$F5="Tühistatud"')&&kontrollStatus.includes('$F5="Kehtiv"'));assert(parandusStatus.includes('$F6="Tühistatud"')&&parandusStatus.includes('$F6="Kehtiv"'));
+ assert.equal((kontrollStatus.match(/ISBLANK\(/g)||[]).length,54);assert.equal((kontrollStatus.match(/TYPE\(/g)||[]).length,54);assert(kontrollStatus.includes('EXACT('));
+ assert.equal((parandusStatus.match(/ISBLANK\(/g)||[]).length,33);assert.equal((parandusStatus.match(/TYPE\(/g)||[]).length,33);assert(parandusStatus.includes('EXACT('));
+ assert(kontrollStatus.includes('INDEX(Kontrollid!$H$5:$H$500,$T5)')&&kontrollStatus.includes('$X5'));assert(kontrollStatus.includes('INDEX(Kontrollid!$Z$5:$Z$500,$T5)')&&kontrollStatus.includes('$AL5'));
+ assert(parandusStatus.includes('INDEX(Parandused!$L$5:$L$500,$T6)')&&parandusStatus.includes('$AT6'));assert(parandusStatus.includes('INDEX(Parandused!$O$5:$O$500,$T6)')&&parandusStatus.includes('$AW6'));
+ assert(kontrollTarget.length<=8192&&parandusTarget.length<=8192&&kontrollStatus.length<=8192&&parandusStatus.length<=8192,'Generated formulas must stay within Excel formula length limit');
+ assert(!/Näidis/.test(kontrollStatus+parandusStatus),'Production status formulas must not create TEST Näidis states');
+ assert.throws(()=>run('signatureTargetFormula("Unknown",5)'),/Tundmatu allkirja sihttüüp/);
+ for(const [sourceCol,snapshotCol] of run('SIGNATURE_SNAPSHOT_FIELDS.Kontroll'))assert(kontrollStatus.includes(`INDEX(Kontrollid!$${sourceCol}$5:$${sourceCol}$500,$T5)`)&&kontrollStatus.includes(`$${snapshotCol}5`),`Missing Kontroll snapshot mapping ${sourceCol} → ${snapshotCol}`);
+ for(const [sourceCol,snapshotCol] of run('SIGNATURE_SNAPSHOT_FIELDS.Parandus'))assert(parandusStatus.includes(`INDEX(Parandused!$${sourceCol}$5:$${sourceCol}$500,$T6)`)&&parandusStatus.includes(`$${snapshotCol}6`),`Missing Parandus snapshot mapping ${sourceCol} → ${snapshotCol}`);
+});
+await test('S1 signature draft list remains local-only and does not invoke workbook writes',async()=>{
  const before=run('TC.revision'),rows=run('TC.records.length');run('refreshSignatureDrafts()');
  assert(el('signatureDraftList').innerHTML.includes('Salvestatud allkirja mustandeid pole'));
  assert.equal(run('TC.revision'),before);assert.equal(run('TC.records.length'),rows);assert.equal(env.signatureStartCalls.length,0);

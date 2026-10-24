@@ -5,6 +5,7 @@ const TC = {schema:1, dbId:null, registryKey:'', registryTokens:[], cycle:null,
   guard:null, revision:0, updatedAt:null, sourceHash:'', ready:false, busy:false,
   records:[], allDefects:[], pending:null, opened:null, exportPending:false, baseWorkbookBase64:'',
   sync:null, deviceId:'', pendingSyncRowIds:null, pendingSemanticRows:null,
+  signatureVersions:{},
   startupLoaded:false, activated:false, startupTask:null, startupError:''};
 const META_NAME='DOLD.TechControl.v1';
 const WORK_PACKAGE_FORMAT='DOLD-TECHCONTROL-WORK-PACKAGE';
@@ -264,7 +265,7 @@ async function bootstrapSavedWorkspace(){
     const latest=[...list].sort((a,b)=>(Date.parse(b.lastUsedAt||b.updatedAt||'')||Number(b.revision)||0)-(Date.parse(a.lastUsedAt||a.updatedAt||'')||Number(a.revision)||0))[0];
     const snap=await storeCall('get',latest.dbId);if(!snap||snap.schema!==1||!snap.workbookBase64)throw Error('Sisemine XLSX töövihik puudub või on vigane.');
     const bytes=decode64(snap.workbookBase64);if(snap.workbookHash&&await digest(bytes)!==snap.workbookHash)throw Error('Sisemise XLSX faili kontrollsumma ei klapi.');
-    Object.assign(TC,{dbId:snap.dbId,registryKey:snap.registryKey||'',registryTokens:snap.registryTokens||[],cycle:snap.cycle||null,sync:snap.sync||null,guard:snap.guard||{remaining:randomGap(),pending:null},revision:Number(snap.revision)||0,updatedAt:snap.updatedAt||null,localUsedAt:snap.lastUsedAt||snap.updatedAt||null,sourceHash:snap.sourceHash||'',baseWorkbookBase64:snap.baseWorkbookBase64||'',ready:false,opened:null,pending:{notice:'Taastatud telefoni salvestatud tööfail.'}});
+    Object.assign(TC,{dbId:snap.dbId,registryKey:snap.registryKey||'',registryTokens:snap.registryTokens||[],cycle:snap.cycle||null,sync:snap.sync||null,signatureVersions:normalizeSignatureVersionMap(snap.signatureVersions),guard:snap.guard||{remaining:randomGap(),pending:null},revision:Number(snap.revision)||0,updatedAt:snap.updatedAt||null,localUsedAt:snap.lastUsedAt||snap.updatedAt||null,sourceHash:snap.sourceHash||'',baseWorkbookBase64:snap.baseWorkbookBase64||'',ready:false,opened:null,pending:{notice:'Taastatud telefoni salvestatud tööfail.'}});
     S.inspector=snap.inspector||'';S.dirty=!!snap.dirty;await loadBook(bytes,snap.fileName||'DOLD_TechControl.xlsx');TC.startupLoaded=true;TC.activated=false;TC.startupError='';loadMinInspectionSetting();renderStartupWorkspace();
   }catch(e){TC.startupLoaded=false;TC.startupError=e.message||String(e);TC.dbId=null;TC.cycle=null;TC.ready=false;S.zip=null;S.fileName='';S.cabinets=[];S.sessionChecked=new Set();renderStartupWorkspace();}
 }
@@ -281,7 +282,7 @@ async function writeMetadata(){
   let p=qsa(d,'property').find(x=>x.getAttribute('name')===META_NAME);
   if(!p){p=d.createElementNS(ns,'property');p.setAttribute('fmtid','{D5CDD505-2E9C-101B-9397-08002B2CF9AE}');p.setAttribute('pid',String(Math.max(1,...qsa(d,'property').map(x=>Number(x.getAttribute('pid'))||1))+1));p.setAttribute('name',META_NAME);d.documentElement.appendChild(p);}
   while(p.firstChild)p.removeChild(p.firstChild);
-  const v=d.createElementNS(vt,'vt:lpwstr');v.textContent=JSON.stringify({schema:1,dbId:TC.dbId,registryKey:TC.registryKey,cycle:TC.cycle,revision:TC.revision,updatedAt:TC.updatedAt,inspector:S.inspector,sync:TC.sync||null});p.appendChild(v);S.zip.file(path,xmlStr(d));
+    const v=d.createElementNS(vt,'vt:lpwstr');v.textContent=JSON.stringify({schema:1,dbId:TC.dbId,registryKey:TC.registryKey,cycle:TC.cycle,revision:TC.revision,updatedAt:TC.updatedAt,inspector:S.inspector,sync:TC.sync||null,signatureVersions:normalizeSignatureVersionMap(TC.signatureVersions)});p.appendChild(v);S.zip.file(path,xmlStr(d));
   const types=parseXml(await S.zip.file('[Content_Types].xml').async('string'));
   if(!qsa(types,'Override').some(x=>x.getAttribute('PartName')==='/'+path)){
     const x=types.createElementNS(types.documentElement.namespaceURI,'Override');x.setAttribute('PartName','/'+path);x.setAttribute('ContentType','application/vnd.openxmlformats-officedocument.custom-properties+xml');types.documentElement.appendChild(x);S.zip.file('[Content_Types].xml',xmlStr(types));
@@ -567,10 +568,10 @@ async function applySyncOperations(operations,senderDeviceId='',directConflictCh
 }
 async function persistWorkspace(){
   if(!TC.dbId||!S.zip)throw Error('Tööfail ei ole avatud');
-  await ensureSyncState();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
+  await ensureSyncState();await reconcileKontrollSignatureVersions();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
   const bytes=await S.zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
   TC.localUsedAt=new Date().toISOString();
-  const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
+  const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,signatureVersions:normalizeSignatureVersionMap(TC.signatureVersions),guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
   await storeCall('put',snapshot);TC.startupLoaded=true;TC.startupSnapshot=snapshot;return bytes;
 }
 function comparableCycleStart(cycle){
@@ -620,7 +621,7 @@ function mergeCurrentCycle(localCycle,incomingCycle){
 async function transaction(change,options={}){
   if(TC.busy||TC.exportPending)return false;setBusy(true);
   const rowIds={Kontroll:Object.fromEntries(TC.records.map(r=>[String(r.row),r.syncId]).filter(([,id])=>id)),Puudus:Object.fromEntries(TC.allDefects.map(d=>[String(d.row),d.syncId]).filter(([,id])=>id))};
-  const before={zip:cloneWorkbook(S.zip),tc:cloneData({cycle:TC.cycle,guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,sync:TC.sync}),semantic:semanticState(),inspector:S.inspector,dirty:S.dirty};
+  const before={zip:cloneWorkbook(S.zip),tc:cloneData({cycle:TC.cycle,guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,sync:TC.sync,signatureVersions:TC.signatureVersions}),semantic:semanticState(),inspector:S.inspector,dirty:S.dirty};
   let committed=false;
   try{TC.pendingSyncRowIds=rowIds;await change();await refreshFromWorkbook();if(!options.skipSemanticJournal)await appendSemanticOperations(before.semantic);await persistWorkspace();committed=true;renderCyclePanel();return true;}
   catch(e){if(committed){alert('Andmed on telefonis salvestatud, kuid vaadet ei saanud uuendada. Ava tööfail uuesti.\n'+e.message);return true;}S.zip=before.zip;Object.assign(TC,before.tc);TC.pendingSyncRowIds=null;TC.pendingSemanticRows=null;S.inspector=before.inspector;S.dirty=before.dirty;await refreshFromWorkbook();alert('Andmeid EI salvestatud. Proovi uuesti.\n'+e.message);return false;}
@@ -700,7 +701,7 @@ async function importXlsx(ev,sourceBytes=null){
       if(choice==='cancel'||!choice)throw Error('Faili valik tühistati. Telefonis salvestatud töö jäi alles.');
       if(choice==='internal'){
         selectedInternal=true;chosenBytes=decode64(local.workbookBase64);chosenName=local.fileName||file.name;
-        Object.assign(TC,{dbId:local.dbId,registryKey:local.registryKey||identity.key,registryTokens:local.registryTokens||identity.tokens,cycle:local.cycle||null,sync:local.sync||null,guard:local.guard||{remaining:randomGap(),pending:null},revision:Number(local.revision)||0,updatedAt:local.updatedAt||null,sourceHash:local.sourceHash||'',baseWorkbookBase64:local.baseWorkbookBase64||''});
+        Object.assign(TC,{dbId:local.dbId,registryKey:local.registryKey||identity.key,registryTokens:local.registryTokens||identity.tokens,cycle:local.cycle||null,sync:local.sync||null,signatureVersions:normalizeSignatureVersionMap(local.signatureVersions||embedded?.signatureVersions),guard:local.guard||{remaining:randomGap(),pending:null},revision:Number(local.revision)||0,updatedAt:local.updatedAt||null,sourceHash:local.sourceHash||'',baseWorkbookBase64:local.baseWorkbookBase64||''});
         S.inspector=local.inspector||'';S.dirty=!!local.dirty;notice='Jätkatakse telefonis salvestatud tööfailiga. Valitud välist faili ei muudetud.';
       }else{
         let importedZip=S.zip,cycle=embedded?.cycle||null;
@@ -709,19 +710,19 @@ async function importXlsx(ev,sourceBytes=null){
           catch(e){
             const recovery=await showAppChoice('Turvalist ühendamist ei saanud teha',`Telefonis olev töö ei ole muutunud.<br>${esc(e.message)}<br><br>Vali, kas jätkata telefonis salvestatud tööga või teadlikult kasutada valitud faili.`,[{value:'internal',label:'JÄTKA TELEFONI TÖÖGA',primary:true},{value:'replace',label:'KASUTA VALITUD FAILI JA ASENDA TELEFONI KOOPIA'},{value:'cancel',label:'TÜHISTA'}]);
             if(recovery==='cancel'||!recovery)throw Error('Ühendamine tühistati. Telefonis salvestatud töö jäi alles.');
-            if(recovery==='internal'){selectedInternal=true;chosenBytes=decode64(local.workbookBase64);chosenName=local.fileName||file.name;Object.assign(TC,{dbId:local.dbId,registryKey:local.registryKey||identity.key,registryTokens:local.registryTokens||identity.tokens,cycle:local.cycle||null,sync:local.sync||null,guard:local.guard||{remaining:randomGap(),pending:null},revision:Number(local.revision)||0,updatedAt:local.updatedAt||null,sourceHash:local.sourceHash||'',baseWorkbookBase64:local.baseWorkbookBase64||''});S.inspector=local.inspector||'';S.dirty=!!local.dirty;notice='Telefonis salvestatud töö taastati; ühendamine ebaõnnestus.';}
+            if(recovery==='internal'){selectedInternal=true;chosenBytes=decode64(local.workbookBase64);chosenName=local.fileName||file.name;Object.assign(TC,{dbId:local.dbId,registryKey:local.registryKey||identity.key,registryTokens:local.registryTokens||identity.tokens,cycle:local.cycle||null,sync:local.sync||null,signatureVersions:normalizeSignatureVersionMap(local.signatureVersions||embedded?.signatureVersions),guard:local.guard||{remaining:randomGap(),pending:null},revision:Number(local.revision)||0,updatedAt:local.updatedAt||null,sourceHash:local.sourceHash||'',baseWorkbookBase64:local.baseWorkbookBase64||''});S.inspector=local.inspector||'';S.dirty=!!local.dirty;notice='Telefonis salvestatud töö taastati; ühendamine ebaõnnestus.';}
             else{cycle=embedded?.cycle||null;notice='Valitud fail kasutati sinu kinnitusega; telefoni eelmist koopiat ei kirjutatud tagasi.';}
           }
         }
         if(!selectedInternal){
           const mergedCycle=merged?mergeCurrentCycle(local.cycle,cycle):cycle;
           chosenBytes=await importedZip.generateAsync({type:'uint8array'});chosenName=file.name;
-          Object.assign(TC,{dbId:embedded?.dbId||local.dbId,registryKey:identity.key,registryTokens:identity.tokens,cycle:mergedCycle,sync:local.sync||embedded?.sync||null,guard:local.guard||{remaining:randomGap(),pending:null},revision:Math.max(Number(local.revision)||0,Number(embedded?.revision)||0),updatedAt:embedded?.updatedAt||local.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});
+          Object.assign(TC,{dbId:embedded?.dbId||local.dbId,registryKey:identity.key,registryTokens:identity.tokens,cycle:mergedCycle,sync:local.sync||embedded?.sync||null,signatureVersions:mergeSignatureVersionMaps(local.signatureVersions,embedded?.signatureVersions),guard:local.guard||{remaining:randomGap(),pending:null},revision:Math.max(Number(local.revision)||0,Number(embedded?.revision)||0),updatedAt:embedded?.updatedAt||local.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});
           S.inspector=embedded?.inspector||local.inspector||'';S.dirty=merged||!!local.dirty;
         }
       }
     }else{
-      Object.assign(TC,{dbId:embedded?.dbId||uid(),registryKey:identity.key,registryTokens:identity.tokens,cycle:embedded?.cycle||null,sync:embedded?.sync||null,guard:{remaining:randomGap(),pending:null},revision:embedded?.revision||0,updatedAt:embedded?.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});S.inspector=embedded?.inspector||'';S.dirty=false;
+      Object.assign(TC,{dbId:embedded?.dbId||uid(),registryKey:identity.key,registryTokens:identity.tokens,cycle:embedded?.cycle||null,sync:embedded?.sync||null,signatureVersions:normalizeSignatureVersionMap(embedded?.signatureVersions),guard:{remaining:randomGap(),pending:null},revision:embedded?.revision||0,updatedAt:embedded?.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});S.inspector=embedded?.inspector||'';S.dirty=false;
       if(!TC.cycle){let legacy;try{legacy=JSON.parse(localStorage.getItem(RING_STORAGE_KEY)||'null');}catch(e){}
         if(legacy?.startedAt&&legacy.checked?.length){const start=localDateIso(new Date(legacy.startedAt));const records=TC.records.filter(r=>legacy.checked.includes(r.id)&&r.date>=start);if(records.length){TC.cycle=cycleFromRecords(records,legacy.startedAt);S.inspector=legacy.inspector||S.inspector;}}
       }
@@ -803,13 +804,96 @@ async function viewSavedInspection(id,record,entry){
   const choice=await showAppChoice('VAATA KONTROLLI',`<b>${esc(id)} • ${esc(cabinetTitle(S.selected))}</b><br>Kontrollitud: ${esc(inspectionStamp(record))}<br>Kontrollija: ${esc(record.inspector||'—')}<div class="topgap">${ratings}</div><div class="topgap"><b>Puudused (${defects.length})</b><br>${defectHtml}</div>`,[{value:'signature',label:'ALLKIRJA MUSTAND'},{value:'back',label:'TAGASI',primary:true}]);
   if(choice==='signature')return startKontrollSignatureDraft(record);
 }
-function draftKontrollRecordVersion(record){
-  const id=persistentSyncId('Kontroll',record?.syncId||record?.persistentId),entity=id?TC.sync?.entities?.Kontroll?.[id]:null,revision=Number(entity?.revision);
-  if(!entity||!Number.isSafeInteger(revision)||revision<1||!entity.values)return {recordVersion:null,recordVersionSource:'UNRESOLVED'};
-  let current;try{current=syncControlValues({...record,syncId:id});}catch(e){return {recordVersion:null,recordVersionSource:'UNRESOLVED'};}
-  const currentKeys=Object.keys(current),storedKeys=Object.keys(entity.values);
-  if(currentKeys.length!==storedKeys.length||currentKeys.some(key=>!fieldValueEqual(current[key]??null,entity.values[key]??null)))return {recordVersion:null,recordVersionSource:'UNRESOLVED'};
-  return {recordVersion:revision,recordVersionSource:'SEMANTIC_REVISION_SCHEMA1'};
+const KONTROLL_VERSION_SOURCE='KONTROLL_SNAPSHOT_METADATA_V1';
+const KONTROLL_VERSION_FORMAT='dold-kontroll-record-version/v1';
+const SIGNATURE_SNAPSHOT_FIELDS={Kontroll:[['A','U'],['B','V'],['D','W'],['H','X'],['I','Y'],['J','Z'],['K','AA'],['L','AB'],['M','AC'],['N','AD'],['O','AE'],['P','AF'],['Q','AG'],['R','AH'],['W','AI'],['X','AJ'],['Y','AK'],['Z','AL']],Parandus:[['B','AM'],['C','AN'],['D','AO'],['E','AP'],['F','AQ'],['G','AR'],['H','AS'],['L','AT'],['M','AU'],['N','AV'],['O','AW']]};
+function normalizeSignatureVersionMap(value){
+  const out={};if(!value||typeof value!=='object'||Array.isArray(value))return out;
+  for(const [id,item] of Object.entries(value)){
+    if(!persistentSyncId('Kontroll',id)||!item||typeof item!=='object')continue;
+    const recordVersion=Number(item.recordVersion),snapshotHash=String(item.snapshotHash||'');
+    if(Number.isSafeInteger(recordVersion)&&recordVersion>=1&&/^[a-f0-9]{64}$/.test(snapshotHash))out[id]={recordVersion,snapshotHash,source:KONTROLL_VERSION_SOURCE};
+  }
+  return out;
+}
+function mergeSignatureVersionMaps(local,incoming){return {...normalizeSignatureVersionMap(incoming),...normalizeSignatureVersionMap(local)};}
+function signatureCanonicalJson(value){
+  if(value===null)return 'null';
+  if(typeof value==='string'){
+    for(let i=0;i<value.length;i++){const c=value.charCodeAt(i);if(c>=0xd800&&c<=0xdbff){if(i+1>=value.length||value.charCodeAt(i+1)<0xdc00||value.charCodeAt(i+1)>0xdfff)throw Error('Sõltuvusväli sisaldab vigast Unicode’i.');i++;}else if(c>=0xdc00&&c<=0xdfff)throw Error('Sõltuvusväli sisaldab vigast Unicode’i.');}
+    return JSON.stringify(value);
+  }
+  if(typeof value==='number'){if(!Number.isFinite(value))throw Error('Sõltuvusväli sisaldab vigast arvu.');return JSON.stringify(value);}
+  if(typeof value==='boolean')return value?'true':'false';
+  if(Array.isArray(value))return '['+value.map(signatureCanonicalJson).join(',')+']';
+  if(typeof value==='object')return '{'+Object.keys(value).sort().map(k=>signatureCanonicalJson(k)+':'+signatureCanonicalJson(value[k])).join(',')+'}';
+  throw Error('Sõltuvusvälja tüüpi ei toetata.');
+}
+function signatureTypedCellValue(doc,col,row){
+  const cell=getCell(doc,col+row);if(!cell)return {type:'blank'};
+  if(qsa(cell,'f').length)return null;
+  const t=cell.getAttribute('t')||'n';
+  if(t==='s'||t==='inlineStr'||t==='str')return {type:'string',value:cellValue(cell)};
+  if(t==='b')return {type:'boolean',value:getV(cell)==='1'};
+  if(t==='e')return null;
+  if(t==='d')return {type:'date',value:getV(cell)};
+  const raw=getV(cell);if(raw==='')return {type:'blank'};
+  const number=Number(raw);return Number.isFinite(number)?{type:'number',value:number}:null;
+}
+function kontrollVersionSnapshot(doc,row,kontrollId){
+  const fields={kontrollId:signatureTypedCellValue(doc,'AA',row),kilpId:signatureTypedCellValue(doc,'B',row),inspectionDate:signatureTypedCellValue(doc,'A',row),inspector:signatureTypedCellValue(doc,'D',row),scores:{}};
+  for(const col of ['H','I','J','K','L','M','N','O','P','Q','R'])fields.scores[col]=signatureTypedCellValue(doc,col,row);
+  fields.start=signatureTypedCellValue(doc,'W',row);fields.end=signatureTypedCellValue(doc,'X',row);fields.duration=signatureTypedCellValue(doc,'Y',row);fields.exceptionReason=signatureTypedCellValue(doc,'Z',row);
+  if(Object.values(fields).some(v=>v===null)||Object.values(fields.scores).some(v=>v===null))return null;
+  if(fields.kontrollId.type!=='string'||fields.kontrollId.value!==kontrollId||fields.kilpId.type!=='string'||!fields.kilpId.value||fields.inspector.type!=='string'||!fields.inspector.value)return null;
+  return {format:KONTROLL_VERSION_FORMAT,fields};
+}
+async function reconcileKontrollSignatureVersions(){
+  TC.signatureVersions=normalizeSignatureVersionMap(TC.signatureVersions);
+  if(!S.zip||!S.paths.Kontrollid)return TC.signatureVersions;
+  const doc=await loadDoc('Kontrollid'),rows=new Map();
+  for(const rowEl of qsa(doc,'row')){
+    const row=Number(rowEl.getAttribute('r'));if(row<5)continue;
+    const id=persistentSyncId('Kontroll',getCellVal(doc,'AA',row));if(!id)continue;
+    const list=rows.get(id)||[];list.push(row);rows.set(id,list);
+  }
+  for(const [id,matches] of rows){
+    if(matches.length!==1)continue;
+    const snapshot=kontrollVersionSnapshot(doc,matches[0],id);if(!snapshot)continue;
+    const snapshotHash=await digest(new TextEncoder().encode(signatureCanonicalJson(snapshot))),prior=TC.signatureVersions[id];
+    if(prior?.snapshotHash===snapshotHash)continue;
+    const recordVersion=prior?Number(prior.recordVersion)+1:1;if(!Number.isSafeInteger(recordVersion)||recordVersion<1)continue;
+    TC.signatureVersions[id]={recordVersion,snapshotHash,source:KONTROLL_VERSION_SOURCE};
+  }
+  return TC.signatureVersions;
+}
+async function draftKontrollRecordVersion(record){
+  const id=persistentSyncId('Kontroll',record?.persistentId||record?.syncId);
+  if(!id||!S.zip||!S.paths.Kontrollid)return {recordVersion:null,recordVersionSource:'UNRESOLVED',recordVersionSnapshotHash:''};
+  const doc=await loadDoc('Kontrollid'),rows=qsa(doc,'row').filter(x=>persistentSyncId('Kontroll',getCellVal(doc,'AA',Number(x.getAttribute('r'))))===id);
+  // Permanent KontrollID is identity. The hydrated row is only a cache hint and may be stale after import/reorder.
+  if(rows.length!==1)return {recordVersion:null,recordVersionSource:'UNRESOLVED',recordVersionSnapshotHash:''};
+  const row=Number(rows[0].getAttribute('r'));
+  if(getCellVal(doc,'B',row).trim()!==String(record.id||'').trim())return {recordVersion:null,recordVersionSource:'UNRESOLVED',recordVersionSnapshotHash:''};
+  if(!kontrollVersionSnapshot(doc,row,id))return {recordVersion:null,recordVersionSource:'UNRESOLVED',recordVersionSnapshotHash:''};
+  const versions=await reconcileKontrollSignatureVersions(),entry=versions[id];
+  if(!entry||entry.source!==KONTROLL_VERSION_SOURCE)return {recordVersion:null,recordVersionSource:'UNRESOLVED',recordVersionSnapshotHash:''};
+  return {recordVersion:entry.recordVersion,recordVersionSource:KONTROLL_VERSION_SOURCE,recordVersionSnapshotHash:entry.snapshotHash};
+}
+function signatureTargetFormula(targetType,row){
+  if(!Number.isInteger(row)||row<5||row>500)throw Error('Allkirja valemi rida peab olema vahemikus 5:500.');
+  const sheet=targetType==='Kontroll'?'Kontrollid':targetType==='Parandus'?'Parandused':'';if(!sheet)throw Error('Tundmatu allkirja sihttüüp.');
+  const col=targetType==='Kontroll'?'AA':'A',id=`$C${row}`,range=`${sheet}!$${col}$5:$${col}$500`;
+  return `=IFERROR(IF(COUNTIF(${range},${id})=1,MATCH(${id},${range},0),\"\"),\"\")`;
+}
+function signatureTypedMatchFormula(targetRef,snapshotRef){
+  return `AND(ISBLANK(${targetRef})=ISBLANK(${snapshotRef}),IF(ISBLANK(${targetRef}),TRUE,AND(TYPE(${targetRef})=TYPE(${snapshotRef}),IF(TYPE(${targetRef})=2,EXACT(${targetRef},${snapshotRef}),${targetRef}=${snapshotRef}))))`;
+}
+function signatureEffectiveStatusFormula(targetType,row){
+  if(!Number.isInteger(row)||row<5||row>500)throw Error('Allkirja valemi rida peab olema vahemikus 5:500.');
+  const sheet=targetType==='Kontroll'?'Kontrollid':targetType==='Parandus'?'Parandused':'';if(!sheet)throw Error('Tundmatu allkirja sihttüüp.');
+  const checks=SIGNATURE_SNAPSHOT_FIELDS[targetType].map(([sourceCol,snapshotCol])=>signatureTypedMatchFormula(`INDEX(${sheet}!$${sourceCol}$5:$${sourceCol}$500,$T${row})`,`$${snapshotCol}${row}`));
+  return `=IFERROR(IF($F${row}=\"Tühistatud\",\"Tühistatud\",IF(OR($T${row}=\"\",NOT(ISNUMBER($T${row}))),\"Tühistatud\",IF(AND($F${row}=\"Kehtiv\",${checks.join(',')}),\"Kehtiv\",\"Tühistatud\"))),\"Tühistatud\")`;
 }
 function startNativeSignatureCapture(target){
   if(!window.Android||typeof Android.startSignatureCapture!=='function'){toast('Allkirja mustand vajab Androidi rakendust.');return false;}
@@ -817,10 +901,12 @@ function startNativeSignatureCapture(target){
   try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){toast('Allkirja mustandit ei saanud alustada.');return false;}return true;}
   catch(e){toast('Allkirja mustandit ei saanud alustada.');return false;}
 }
-function startKontrollSignatureDraft(record){
-  const id=persistentSyncId('Kontroll',record?.syncId||record?.persistentId);if(!id){toast('Sellel kontrollil puudub püsiv KontrollID.');return false;}
-  const version=draftKontrollRecordVersion({...record,syncId:id});
-  return startNativeSignatureCapture({targetType:'Kontroll',recordId:id,kilpId:record.id,signerName:record.inspector,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,metadata:{workbookIdentity:TC.dbId||'',inspectionDate:record.date||'',inspectorName:record.inspector||''}});
+async function startKontrollSignatureDraft(record){
+  const id=persistentSyncId('Kontroll',record?.persistentId||record?.syncId);if(!id){toast('Sellel kontrollil puudub püsiv KontrollID.');return false;}
+  try{
+    const version=await draftKontrollRecordVersion(record);await persistWorkspace();
+    return startNativeSignatureCapture({targetType:'Kontroll',recordId:id,kilpId:record.id,signerName:record.inspector,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,metadata:{workbookIdentity:TC.dbId||'',inspectionDate:record.date||'',inspectorName:record.inspector||'',recordVersionSnapshotHash:version.recordVersionSnapshotHash||''}});
+  }catch(e){toast('Allkirja kirjeversiooni ei saanud telefoni salvestada. XLSX jäi muutmata.');return false;}
 }
 function startParandusSignatureDraft(record){
   const recordId=String(record?.recordId||record?.parandusId||'').trim(),rawVersion=record?.recordVersion??record?.version??null,version=Number(rawVersion),knownVersion=Number.isSafeInteger(version)&&version>=1;
@@ -1001,7 +1087,7 @@ async function createWorkPackageBytes(){
   snapshot.summary=summary;await storeCall('put',snapshot);
   const baseBytes=snapshot.baseWorkbookBase64?decode64(snapshot.baseWorkbookBase64):null;
   const cycle=cloneData(snapshot.cycle||null),checkedIds=Object.keys(cycle?.entries||{}).sort();
-  const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle,checkedIds,sync:snapshot.sync||null,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,lastUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,workbookHash:snapshot.workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary,baseWorkbookSha256:baseBytes?await digest(baseBytes):null};
+  const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle,checkedIds,sync:snapshot.sync||null,signatureVersions:normalizeSignatureVersionMap(snapshot.signatureVersions),guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,lastUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,workbookHash:snapshot.workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary,baseWorkbookSha256:baseBytes?await digest(baseBytes):null};
   const stateBytes=new TextEncoder().encode(JSON.stringify(state)),workbookHash=await digest(workbookBytes),stateHash=await digest(stateBytes),baseHash=baseBytes?await digest(baseBytes):null;
   const zip=new JSZip();zip.file('workbook.xlsx',workbookBytes);zip.file('state.json',stateBytes);if(baseBytes)zip.file('base-workbook.xlsx',baseBytes);
   const manifest={format:WORK_PACKAGE_FORMAT,version:1,createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',dbId:state.dbId,sha256:stateHash,size:stateBytes.length},baseWorkbook:baseBytes?{path:'base-workbook.xlsx',sha256:baseHash,size:baseBytes.length}:null,summary};
@@ -1023,7 +1109,7 @@ function syncPackageName(mode){const d=new Date(),p=n=>String(n).padStart(2,'0')
 async function createSyncBaselineBytes(){
   if(!S.zip||!TC.dbId||!TC.sync)throw Error('Enne teise telefoni ettevalmistamist ava XLSX tööfail.');
   const workbookBytes=await persistWorkspace(),snapshot=TC.startupSnapshot,workbookHash=await digest(workbookBytes),summary=await summarizeWorkbookBytes(workbookBytes,S.fileName,snapshot.cycle,{updatedAt:snapshot.updatedAt,revision:snapshot.revision});
-  const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,revision:snapshot.revision,updatedAt:snapshot.updatedAt,sourceHash:snapshot.sourceHash,workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary};
+  const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,signatureVersions:normalizeSignatureVersionMap(snapshot.signatureVersions),revision:snapshot.revision,updatedAt:snapshot.updatedAt,sourceHash:snapshot.sourceHash,workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary};
   const stateBytes=new TextEncoder().encode(JSON.stringify(state)),stateHash=await digest(stateBytes),zip=new JSZip();zip.file('workbook.xlsx',workbookBytes);zip.file('state.json',stateBytes);
   const manifest={format:SYNC_PACKAGE_FORMAT,version:1,mode:'baseline',createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,epoch:state.sync.epoch,senderDeviceId:TC.deviceId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',sha256:stateHash,size:stateBytes.length},summary};
   zip.file('manifest.json',JSON.stringify(manifest,null,2));return zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
@@ -1382,8 +1468,8 @@ async function importSyncBaseline(archive,manifest,file,options={}){
     :`Seade saab sama dbId ja sünkroonimise algseisu. Selle telefoni deviceId jääb eraldi.<div class="topgap">${summaryBlock('SAABUV BAAS',incomingSummary)}</div><p class="topgap">Pärast seda saab mõlemas telefonis paralleelselt töötada ja muudatusi vahetada.</p>`;
   const choice=await showAppChoice(options.directBootstrap?'UUS TELEFON':'VALMISTA TEINE TELEFON',preview,[{value:'initialize',label:options.directBootstrap?'VALMISTA SEE TELEFON ETTE':'VALMISTA ETTE',primary:true},{value:'cancel',label:'TÜHISTA'}]);
   if(choice!=='initialize')return;
-  const snapshot={schema:1,dbId:state.dbId,fileName:state.fileName||manifest.fileName||file.name,registryKey:state.registryKey||'',registryTokens:state.registryTokens||[],cycle:state.cycle||null,sync:state.sync,guard:{remaining:randomGap(),pending:null},revision:Number(state.revision)||0,updatedAt:state.updatedAt||manifest.createdAt,lastUsedAt:new Date().toISOString(),sourceHash:state.sourceHash||manifest.workbook.sha256,baseWorkbookBase64:bytesToBase64(workbookBytes),inspector:state.inspector||'',dirty:!!state.dirty,workbookHash:manifest.workbook.sha256,summary:incomingSummary,workbookBase64:bytesToBase64(workbookBytes)};
-  await storeCall('put',snapshot);Object.assign(TC,{dbId:snapshot.dbId,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,localUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,baseWorkbookBase64:snapshot.baseWorkbookBase64,ready:false,opened:null,pending:{notice:'Teise telefoni baastöö vastu võetud.'}});
+  const snapshot={schema:1,dbId:state.dbId,fileName:state.fileName||manifest.fileName||file.name,registryKey:state.registryKey||'',registryTokens:state.registryTokens||[],cycle:state.cycle||null,sync:state.sync,signatureVersions:normalizeSignatureVersionMap(state.signatureVersions),guard:{remaining:randomGap(),pending:null},revision:Number(state.revision)||0,updatedAt:state.updatedAt||manifest.createdAt,lastUsedAt:new Date().toISOString(),sourceHash:state.sourceHash||manifest.workbook.sha256,baseWorkbookBase64:bytesToBase64(workbookBytes),inspector:state.inspector||'',dirty:!!state.dirty,workbookHash:manifest.workbook.sha256,summary:incomingSummary,workbookBase64:bytesToBase64(workbookBytes)};
+  await storeCall('put',snapshot);Object.assign(TC,{dbId:snapshot.dbId,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,signatureVersions:snapshot.signatureVersions,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,localUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,baseWorkbookBase64:snapshot.baseWorkbookBase64,ready:false,opened:null,pending:{notice:'Teise telefoni baastöö vastu võetud.'}});
   S.inspector=snapshot.inspector;S.dirty=snapshot.dirty;S.stagedDefects=[];await loadBook(workbookBytes,snapshot.fileName);TC.startupLoaded=true;TC.startupSnapshot=snapshot;TC.startupError='';TC.startupWarning='';TC.activated=true;
   $('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();if(!options.directBootstrap)await persistWorkspace();renderStartupWorkspace();renderCyclePanel();showTab('home');
   if(options.directBootstrap)await showAppChoice('TELEFON ON VALMIS',`${directBootstrapSummary(snapshot.fileName,incomingSummary)}<p class="topgap">Sama tööbaas on salvestatud. Sellel telefonil on eraldi seadme tunnus.</p>`,[{value:'done',label:'VALMIS',primary:true}]);else toast('Telefon on paralleelseks tööks ette valmistatud',4500);
@@ -1457,9 +1543,9 @@ async function importWorkPackage(ev,sourceBytes=null){
       choice=await showAppChoice('Võrdle tööpaketti',`<b>${esc(status)}</b><div class="topgap">${summaryBlock('TELEFONIS',localSummary)}</div><div class="topgap">${summaryBlock('SAABUV PAKETT',incomingSummary)}</div>${identityWarning}<p class="topgap">Telefonis olev töö asendatakse ainult siis, kui valid paketi vastuvõtu.</p>`,relation==='incoming'?[{value:'incoming',label:'VÕTA UUEM PAKETT VASTU',primary:true},{value:'internal',label:'JÄTKA TELEFONI TÖÖGA'},{value:'cancel',label:'TÜHISTA'}]:[{value:'internal',label:'JÄTKA TELEFONI TÖÖGA',primary:true},{value:'incoming',label:'VÕTA PAKETT VASTU JA ASENDA TELEFONI TÖÖ'},{value:'cancel',label:'TÜHISTA'}]);
     }else choice=await showAppChoice('Võta töö vastu',`Telefonis pole avatud tööfaili.<div class="topgap">${summaryBlock('SAABUV PAKETT',incomingSummary)}</div><p class="topgap">Vastuvõtt salvestab XLSX-i ja kontrolli oleku telefoni.</p>`,[{value:'incoming',label:'VÕTA TÖÖ VASTU',primary:true},{value:'cancel',label:'TÜHISTA'}]);
     if(choice!=='incoming'){toast('Tööpaketti ei võetud vastu. Telefoni andmeid ei muudetud.');return;}
-    const snapshot={schema:1,dbId:state.dbId,fileName:state.fileName||manifest.fileName||'DOLD_TechControl.xlsx',registryKey:state.registryKey||'',registryTokens:state.registryTokens||[],cycle:state.cycle||null,sync:state.sync||null,guard:state.guard||{remaining:randomGap(),pending:null},revision:Number(state.revision)||0,updatedAt:state.updatedAt||manifest.createdAt,lastUsedAt:new Date().toISOString(),sourceHash:state.sourceHash||manifest.workbook.sha256,baseWorkbookBase64:baseBytes?bytesToBase64(baseBytes):'',inspector:state.inspector||'',dirty:!!state.dirty,workbookHash:manifest.workbook.sha256,summary:incomingSummary,workbookBase64:bytesToBase64(workbookBytes)};
+    const snapshot={schema:1,dbId:state.dbId,fileName:state.fileName||manifest.fileName||'DOLD_TechControl.xlsx',registryKey:state.registryKey||'',registryTokens:state.registryTokens||[],cycle:state.cycle||null,sync:state.sync||null,signatureVersions:normalizeSignatureVersionMap(state.signatureVersions),guard:state.guard||{remaining:randomGap(),pending:null},revision:Number(state.revision)||0,updatedAt:state.updatedAt||manifest.createdAt,lastUsedAt:new Date().toISOString(),sourceHash:state.sourceHash||manifest.workbook.sha256,baseWorkbookBase64:baseBytes?bytesToBase64(baseBytes):'',inspector:state.inspector||'',dirty:!!state.dirty,workbookHash:manifest.workbook.sha256,summary:incomingSummary,workbookBase64:bytesToBase64(workbookBytes)};
     await storeCall('put',snapshot);
-    Object.assign(TC,{dbId:snapshot.dbId,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,localUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,baseWorkbookBase64:snapshot.baseWorkbookBase64,ready:false,opened:null,pending:{notice:'Teiselt telefonilt vastu võetud tööpakett.'}});
+    Object.assign(TC,{dbId:snapshot.dbId,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,signatureVersions:snapshot.signatureVersions,guard:snapshot.guard,revision:snapshot.revision,updatedAt:snapshot.updatedAt,localUsedAt:snapshot.lastUsedAt,sourceHash:snapshot.sourceHash,baseWorkbookBase64:snapshot.baseWorkbookBase64,ready:false,opened:null,pending:{notice:'Teiselt telefonilt vastu võetud tööpakett.'}});
     S.inspector=snapshot.inspector;S.dirty=snapshot.dirty;S.stagedDefects=[];await loadBook(workbookBytes,snapshot.fileName);TC.startupLoaded=true;TC.startupSnapshot=snapshot;TC.startupError='';TC.startupWarning='';TC.activated=true;TC.ready=false;
     $('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();renderStartupWorkspace();renderCyclePanel();showTab('home');toast('Tööpakett vastu võetud. Puudused ja parandused on avatud.',4500);
   }catch(e){alert('Tööpaketi vastuvõtt ebaõnnestus. Telefoni eelmine töö jäi alles.\n'+e.message);}

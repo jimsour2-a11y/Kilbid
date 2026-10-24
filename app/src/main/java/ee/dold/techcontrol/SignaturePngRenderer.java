@@ -8,12 +8,57 @@ import java.util.zip.CRC32;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
 
-/** Experimental S1 renderer. It rasterizes captured normalized points, never an imported image. */
+/** Canonical S1.5 renderer. It rasterizes normalized points, never a screenshot or imported image. */
 final class SignaturePngRenderer {
+    static final String PROFILE = "dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata";
+    static final int CANONICAL_WIDTH = 900;
+    static final int CANONICAL_HEIGHT = 300;
+    private static final int CANONICAL_PADDING_X = 72;
+    private static final int CANONICAL_PADDING_Y = 24;
+    private static final int CANONICAL_RADIUS = 4;
     private static final byte[] PNG_SIGNATURE = new byte[]{(byte) 137, 80, 78, 71, 13, 10, 26, 10};
     private static final int MAX_PIXELS = 4_000_000;
 
     private SignaturePngRenderer() {}
+
+    static byte[] renderCanonical(List<SignatureCaptureCore.Point> points) {
+        if (points == null || points.size() < 2) throw new IllegalArgumentException("Allkirja jaoks on vaja vähemalt kahte punkti");
+        int width = CANONICAL_WIDTH, height = CANONICAL_HEIGHT;
+        byte[] pixels = new byte[Math.multiplyExact(Math.multiplyExact(width, height), 4)]; // transparent RGBA
+        SignatureCaptureCore.Point previous = null;
+        int previousStroke = 0, previousPoint = 0, previousElapsed = -1;
+        java.util.Set<Long> positions = new java.util.HashSet<>();
+        for (SignatureCaptureCore.Point point : points) {
+            if (point == null || point.strokeNr < 1 || point.xNorm < 0 || point.xNorm > 1_000_000
+                    || point.yNorm < 0 || point.yNorm > 1_000_000 || point.elapsedMs < previousElapsed)
+                throw new IllegalArgumentException("Allkirja normaliseeritud punkt on vigane");
+            if (previous == null) {
+                if (point.strokeNr != 1 || point.pointNr != 1) throw new IllegalArgumentException("Allkirja punktide järjekord on vigane");
+            } else if (point.strokeNr == previousStroke) {
+                if (point.pointNr != previousPoint + 1) throw new IllegalArgumentException("Allkirja punktide järjekord on vigane");
+            } else if (point.strokeNr == previousStroke + 1 && point.pointNr == 1) {
+                previous = null;
+            } else {
+                throw new IllegalArgumentException("Allkirja joonte järjekord on vigane");
+            }
+            int x = CANONICAL_PADDING_X + Math.round(point.xNorm * (width - 1 - 2f * CANONICAL_PADDING_X) / 1_000_000f);
+            int y = CANONICAL_PADDING_Y + Math.round(point.yNorm * (height - 1 - 2f * CANONICAL_PADDING_Y) / 1_000_000f);
+            if (previous == null) {
+                drawDisk(pixels, width, height, x, y, CANONICAL_RADIUS);
+            } else {
+                int px = CANONICAL_PADDING_X + Math.round(previous.xNorm * (width - 1 - 2f * CANONICAL_PADDING_X) / 1_000_000f);
+                int py = CANONICAL_PADDING_Y + Math.round(previous.yNorm * (height - 1 - 2f * CANONICAL_PADDING_Y) / 1_000_000f);
+                drawLine(pixels, width, height, px, py, x, y, CANONICAL_RADIUS);
+            }
+            positions.add((((long) point.xNorm) << 20) | point.yNorm);
+            previous = point;
+            previousStroke = point.strokeNr;
+            previousPoint = point.pointNr;
+            previousElapsed = point.elapsedMs;
+        }
+        if (positions.size() < 2) throw new IllegalArgumentException("Allkirja geomeetria on liiga lühike");
+        return encodePng(width, height, pixels);
+    }
 
     static byte[] render(int width, int height, List<SignatureCaptureCore.Point> points) {
         if (width < 2 || height < 2 || (long) width * height > MAX_PIXELS)

@@ -249,7 +249,7 @@ public class MainActivity extends Activity {
             out.put("appVersionCode", draft.appVersionCode);
             out.put("androidRelease", draft.androidRelease);
             out.put("androidApiLevel", draft.androidApiLevel);
-            out.put("antiReuse", new JSONObject().put("algorithm", "dold-exact-reuse/v1")
+            out.put("antiReuse", new JSONObject().put("algorithm", SignatureCaptureCore.ANTI_REUSE_ALGORITHM)
                     .put("result", draft.antiReuseResult).put("scope", draft.antiReuseScope)
                     .put("checkedAtUtcMs", draft.antiReuseCheckedAtUtcMs)
                     .put("checkedCount", draft.antiReuseCheckedCount)

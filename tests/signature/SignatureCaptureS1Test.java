@@ -26,6 +26,26 @@ public final class SignatureCaptureS1Test {
             check("{\"a\":\"ä\\n\",\"z\":[true,0]}".equals(SignatureCanonicalJson.stringify(value)), "canonical JSON differs");
             check("c2f2e522557588f0fb943228a4c695a383418cbaa0437628e621cebcf59e0442".equals(SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(value))), "canonical hash differs from golden vector");
         });
+        test("local anti-reuse registry projection matches R4 JCS golden vectors", () -> {
+            Map<String,Object> second = new LinkedHashMap<>();
+            second.put("geometryHash", "g2"); second.put("ignoredLegacyField", "not-in-digest"); second.put("signatureId", "dtc-sign-00000000-0000-4000-8000-000000000002");
+            second.put("nonce", "n2"); second.put("strokeHash", "s2"); second.put("pngHash", "p2");
+            Map<String,Object> first = new LinkedHashMap<>();
+            first.put("strokeHash", "s1"); first.put("signatureId", "dtc-sign-00000000-0000-4000-8000-000000000001");
+            first.put("geometryHash", "g1"); first.put("nonce", "n1"); // missing legacy pngHash is projected as null
+            List<Map<String,Object>> entries = Arrays.asList(second, first);
+            String digest = SignatureDraftStore.registryDigest(entries);
+            check("4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945".equals(SignatureDraftStore.registryDigest(Collections.emptyList())), "empty registry digest differs from golden vector");
+            check(digest.equals(SignatureDraftStore.registryDigest(Arrays.asList(first, second))), "registry sort is not by signatureId");
+            check("d9261cda6af4c9df3350398ad57d5d5957d8bcb1c0f15c18a4583d952635fc06".equals(digest), "non-empty registry digest differs from golden vector");
+        });
+        test("local anti-reuse checks each exact indicator independently", () -> {
+            check(SignatureDraftStore.hasExactReuseMatch("n", "s", "p", "g", "n", "x", "y", "z"), "nonce duplicate not detected");
+            check(SignatureDraftStore.hasExactReuseMatch("x", "s", "p", "g", "y", "s", "z", "w"), "StrokeHash duplicate not detected");
+            check(SignatureDraftStore.hasExactReuseMatch("x", "s", "p", "g", "y", "t", "p", "w"), "PNGHash duplicate not detected");
+            check(SignatureDraftStore.hasExactReuseMatch("x", "s", "p", "g", "y", "t", "q", "g"), "geometryHash duplicate not detected");
+            check(!SignatureDraftStore.hasExactReuseMatch("n", "s", "p", "g", "x", "t", "q", "z"), "different exact indicators were marked duplicate");
+        });
         test("new capture starts empty with UUIDv4 AllkiriID and 32-byte nonce", () -> {
             SignatureCaptureCore.Session s = session("Kontroll", "dtc-kontroll-test-1", null, Collections.emptyMap(), 1_700_000_000_000L, 1_000L);
             check(s.pointCount() == 0 && s.strokeCount() == 0, "new capture is not empty");
@@ -155,9 +175,43 @@ public final class SignatureCaptureS1Test {
             SignatureCaptureCore.Draft d = simpleDraft(0, 0, 100, 50);
             check(SignatureCanonicalJson.sha256(d.pngBytes).equals(d.pngHash), "PNG hash differs");
             java.awt.image.BufferedImage image = ImageIO.read(new ByteArrayInputStream(d.pngBytes));
-            check(image != null && image.getWidth() == 101 && image.getHeight() == 51, "PNG cannot be decoded or has wrong dimensions");
-            check(image.getRGB(0, 0) != image.getRGB(50, 0), "rendered stroke is not visible");
-            check(d.rendererProfile.contains("experimental") || SignatureCaptureCore.RENDERER_PROFILE.contains("raster-v1"), "renderer profile is not marked experimental");
+            check(image != null && image.getWidth() == 900 && image.getHeight() == 300, "canonical PNG cannot be decoded or has wrong dimensions");
+            check((image.getRGB(0, 0) >>> 24) == 0, "canonical background is not transparent");
+            check(image.getRGB(450, 150) == 0xff000000, "canonical stroke is not visible at expected normalized position");
+            check(SignatureCaptureCore.RENDERER_PROFILE.equals(d.rendererProfile), "draft does not name the production-candidate renderer");
+            check("dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata".equals(d.rendererProfile), "renderer profile contract changed unexpectedly");
+            SignatureCaptureCore.Draft anotherCanvas = simpleDraftSized(201, 101);
+            check(d.pngHash.equals(anotherCanvas.pngHash) && Arrays.equals(d.pngBytes, anotherCanvas.pngBytes), "canonical PNG depends on physical canvas resolution");
+            check("a5cf891249a2ed6f135d88d6afd25f611573338458a1c4373acabc3515823887".equals(d.pngHash), "canonical renderer PNG golden vector changed");
+            expect(IllegalArgumentException.class, () -> SignaturePngRenderer.renderCanonical(Collections.singletonList(d.points.get(0))));
+        });
+        test("test-only block-letter POC vector has a fixed canonical PNG hash", () -> {
+            byte[] png = SignaturePngRenderer.renderCanonical(SignaturePngPocFixture.points());
+            check("ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f".equals(SignatureCanonicalJson.sha256(png)), "POC PNG golden vector changed");
+            java.awt.image.BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
+            check(image != null && image.getWidth() == 900 && image.getHeight() == 300, "POC dimensions changed");
+            check((image.getRGB(1, 1) >>> 24) == 0, "POC image background is not transparent");
+        });
+        test("old S1 experimental drafts remain readable without relabeling their stored PNG", () -> {
+            Path dir = Files.createTempDirectory("dold-s1-legacy-profile-");
+            try {
+                SignatureCaptureCore.Draft current = simpleDraft(0, 0, 100, 50);
+                byte[] oldPng = SignaturePngRenderer.render(current.canvasWidthPx, current.canvasHeightPx, current.points);
+                SignatureCaptureCore.Target target = new SignatureCaptureCore.Target(current.targetType, current.recordId,
+                        current.kilpId, current.signerName, current.recordVersion, current.recordVersionSource, current.targetMetadata);
+                SignatureCaptureCore.DeviceInfo device = new SignatureCaptureCore.DeviceInfo(current.deviceInstanceId,
+                        current.appVersionName, current.appVersionCode, current.androidRelease, current.androidApiLevel);
+                SignatureCaptureCore.Draft old = new SignatureCaptureCore.Draft(current.status, current.signatureId, target,
+                        current.nonce, current.captureStartedAtUtcMs, current.captureEndedAtUtcMs, current.captureDurationMs,
+                        current.points, current.strokeCount, current.canvasWidthPx, current.canvasHeightPx, oldPng,
+                        SignatureCanonicalJson.sha256(oldPng), current.strokeHash, current.geometryHash, device,
+                        "NOT_CHECKED", 0L, 0, "", Collections.emptyList(), SignatureCaptureCore.LEGACY_EXPERIMENTAL_RENDERER_PROFILE);
+                SignatureDraftStore store = new SignatureDraftStore(dir.toFile());
+                store.saveDraft(old);
+                SignatureCaptureCore.Draft restored = store.listDrafts().get(0);
+                check(SignatureCaptureCore.LEGACY_EXPERIMENTAL_RENDERER_PROFILE.equals(restored.rendererProfile), "legacy PNG was mislabeled as production renderer output");
+                check(Arrays.equals(oldPng, restored.pngBytes), "legacy stored PNG changed during profile migration");
+            } finally { deleteTree(dir); }
         });
         test("store persists the complete local draft atomically and survives a new store instance", () -> {
             Path dir = Files.createTempDirectory("dold-s1-store-");
@@ -235,7 +289,7 @@ public final class SignatureCaptureS1Test {
 
     private static SignatureCaptureCore.Target target(String type, String id, Long version, Map<String,String> metadata) {
         return new SignatureCaptureCore.Target(type, id, "EK-027", "Vladimir J", version,
-                version == null ? "UNRESOLVED" : ("Kontroll".equals(type) ? "SEMANTIC_REVISION_SCHEMA1" : "PARANDUSED_L"), metadata);
+                version == null ? "UNRESOLVED" : ("Kontroll".equals(type) ? SignatureCaptureCore.KONTROLL_RECORD_VERSION_SOURCE : "PARANDUSED_L"), metadata);
     }
 
     private static SignatureCaptureCore.Session session(String type, String id, Long version,
@@ -249,6 +303,12 @@ public final class SignatureCaptureS1Test {
     private static SignatureCaptureCore.Draft simpleDraft(float x1, float y1, float x2, float y2) throws Exception {
         SignatureCaptureCore.Session s = session("Kontroll", "dtc-kontroll-test-1", null, Collections.emptyMap(), 1_700_000_000_000L, 1_000L);
         s.setCanvasSize(101, 51); s.beginStroke(x1, y1, 1_005); s.endStroke(x2, y2, 1_010);
+        return s.finish(1_700_000_000_100L, 1_100L);
+    }
+
+    private static SignatureCaptureCore.Draft simpleDraftSized(int width, int height) throws Exception {
+        SignatureCaptureCore.Session s = session("Kontroll", "dtc-kontroll-test-1", null, Collections.emptyMap(), 1_700_000_000_000L, 1_000L);
+        s.setCanvasSize(width, height); s.beginStroke(0, 0, 1_005); s.endStroke(width - 1, height - 1, 1_010);
         return s.finish(1_700_000_000_100L, 1_100L);
     }
 

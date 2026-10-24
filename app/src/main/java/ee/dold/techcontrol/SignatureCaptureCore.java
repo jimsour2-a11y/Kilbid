@@ -20,12 +20,19 @@ final class SignatureCaptureCore {
     static final String INPUT_METHOD = "TOUCH";
     static final String DRAFT_STATUS = "S1_DRAFT";
     static final String ANTI_REUSE_SCOPE = "LOCAL_KNOWN_DATA";
-    static final String RENDERER_PROFILE = "dold-s1-experimental-raster-v1;white-rgba;black-round-2pct;png-deflate-6";
+    static final String ANTI_REUSE_ALGORITHM = "dold-exact-reuse/v1";
+    static final String KONTROLL_RECORD_VERSION_SOURCE = "KONTROLL_SNAPSHOT_METADATA_V1";
+    static final String LEGACY_EXPERIMENTAL_RENDERER_PROFILE = "dold-s1-experimental-raster-v1;white-rgba;black-round-2pct;png-deflate-6";
+    static final String RENDERER_PROFILE = SignaturePngRenderer.PROFILE;
     static final int MAX_POINTS = 250_000;
     private static final long WALL_CLOCK_TOLERANCE_MS = 5_000L;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private SignatureCaptureCore() {}
+
+    static boolean isSupportedRendererProfile(String profile) {
+        return RENDERER_PROFILE.equals(profile) || LEGACY_EXPERIMENTAL_RENDERER_PROFILE.equals(profile);
+    }
 
     interface SignatureIdLookup { boolean exists(String signatureId) throws Exception; }
 
@@ -74,7 +81,7 @@ final class SignatureCaptureCore {
                 if (!"UNRESOLVED".equals(recordVersionSource)) throw new IllegalArgumentException("Lahendamata kirje versiooni allikas on vigane");
             } else {
                 if (recordVersion < 1) throw new IllegalArgumentException("Kirje versioon peab olema positiivne või lahendamata");
-                String expectedSource = "Kontroll".equals(targetType) ? "SEMANTIC_REVISION_SCHEMA1"
+                String expectedSource = "Kontroll".equals(targetType) ? KONTROLL_RECORD_VERSION_SOURCE
                         : "Parandus".equals(targetType) ? "PARANDUSED_L" : "";
                 if (recordVersionSource.isEmpty() || (!expectedSource.isEmpty() && !expectedSource.equals(recordVersionSource)))
                     throw new IllegalArgumentException("Kirje versiooni allikas ei vasta sihtkirje liigile");
@@ -195,6 +202,17 @@ final class SignatureCaptureCore {
               String strokeHash, String geometryHash, DeviceInfo device,
               String antiReuseResult, long checkedAt, int checkedCount,
               String registryDigest, List<String> matches) {
+            this(status, signatureId, target, nonce, startUtc, endUtc, duration, points, strokeCount,
+                    width, height, png, pngHash, strokeHash, geometryHash, device, antiReuseResult,
+                    checkedAt, checkedCount, registryDigest, matches, RENDERER_PROFILE);
+        }
+
+        Draft(String status, String signatureId, Target target, String nonce,
+              long startUtc, long endUtc, long duration, List<Point> points,
+              int strokeCount, int width, int height, byte[] png, String pngHash,
+              String strokeHash, String geometryHash, DeviceInfo device,
+              String antiReuseResult, long checkedAt, int checkedCount,
+              String registryDigest, List<String> matches, String rendererProfile) {
             this.schemaVersion = 1;
             this.status = status;
             this.signatureId = signatureId;
@@ -220,7 +238,7 @@ final class SignatureCaptureCore {
             this.pngHash = pngHash;
             this.strokeHash = strokeHash;
             this.geometryHash = geometryHash;
-            this.rendererProfile = RENDERER_PROFILE;
+            this.rendererProfile = rendererProfile;
             this.deviceInstanceId = device.deviceInstanceId;
             this.appVersionName = device.appVersionName;
             this.appVersionCode = device.appVersionCode;
@@ -241,7 +259,7 @@ final class SignatureCaptureCore {
             DeviceInfo device = new DeviceInfo(deviceInstanceId, appVersionName, appVersionCode, androidRelease, androidApiLevel);
             return new Draft(status, signatureId, target, nonce, captureStartedAtUtcMs, captureEndedAtUtcMs,
                     captureDurationMs, points, strokeCount, canvasWidthPx, canvasHeightPx, pngBytes, pngHash,
-                    strokeHash, geometryHash, device, result, checkedAt, checkedCount, digest, matches);
+                    strokeHash, geometryHash, device, result, checkedAt, checkedCount, digest, matches, rendererProfile);
         }
 
         Map<String, Object> strokesObject() {
@@ -390,7 +408,7 @@ final class SignatureCaptureCore {
 
             Map<String, Object> strokes = strokeObject(width, height, points);
             Map<String, Object> geometry = geometryObject(points);
-            byte[] png = SignaturePngRenderer.render(width, height, points);
+            byte[] png = SignaturePngRenderer.renderCanonical(points);
             String pngHash = SignatureCanonicalJson.sha256(png);
             String strokeHash = SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(strokes));
             String geometryHash = SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(geometry));

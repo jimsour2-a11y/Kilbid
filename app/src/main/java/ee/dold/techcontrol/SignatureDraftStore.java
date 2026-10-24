@@ -52,10 +52,8 @@ final class SignatureDraftStore {
         for (SignatureCaptureCore.Draft prior : registry.drafts) {
             if (prior.signatureId.equals(source.signatureId))
                 throw new IOException("AllkiriID on telefonis juba kasutusel");
-            if (source.nonce.equals(prior.nonce)
-                    || source.strokeHash.equals(prior.strokeHash)
-                    || source.pngHash.equals(prior.pngHash)
-                    || source.geometryHash.equals(prior.geometryHash)) {
+            if (hasExactReuseMatch(source.nonce, source.strokeHash, source.pngHash, source.geometryHash,
+                    prior.nonce, prior.strokeHash, prior.pngHash, prior.geometryHash)) {
                 matches.add(prior.signatureId);
             }
         }
@@ -103,8 +101,26 @@ final class SignatureDraftStore {
         drafts.sort(Comparator.comparing(d -> d.signatureId));
         List<Map<String, Object>> projection = new ArrayList<>();
         for (SignatureCaptureCore.Draft draft : drafts) projection.add(draft.registryObject());
-        String digest = SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(projection));
+        String digest = registryDigest(projection);
         return new Registry(true, drafts, digest);
+    }
+
+    static String registryDigest(List<Map<String, Object>> entries) {
+        String[] fields = {"signatureId", "nonce", "strokeHash", "pngHash", "geometryHash"};
+        List<Map<String, Object>> projection = new ArrayList<>();
+        for (Map<String, Object> entry : entries) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            for (String field : fields) row.put(field, entry != null && entry.containsKey(field) ? entry.get(field) : null);
+            projection.add(row); // Unknown legacy fields are intentionally excluded.
+        }
+        projection.sort(Comparator.comparing(row -> String.valueOf(row.get("signatureId"))));
+        return SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(projection));
+    }
+
+    static boolean hasExactReuseMatch(String nonce, String strokeHash, String pngHash, String geometryHash,
+                                      String priorNonce, String priorStrokeHash, String priorPngHash, String priorGeometryHash) {
+        return nonce.equals(priorNonce) || strokeHash.equals(priorStrokeHash)
+                || pngHash.equals(priorPngHash) || geometryHash.equals(priorGeometryHash);
     }
 
     private void ensureDirectory() throws IOException {
@@ -280,9 +296,9 @@ final class SignatureDraftStore {
             SignatureCaptureCore.Draft draft = new SignatureCaptureCore.Draft(status, signatureId, target, nonce,
                     startedAt, endedAt, duration, points, strokeCount, width, height, png, pngHash,
                     strokeHash, geometryHash, device, antiReuseResult, checkedAt, checkedCount,
-                    registryDigest, matches);
+                    registryDigest, matches, rendererProfile);
             if (!SignatureCaptureCore.CLOCK_SOURCE.equals(clockSource) || !SignatureCaptureCore.INPUT_METHOD.equals(inputMethod)
-                    || !SignatureCaptureCore.RENDERER_PROFILE.equals(rendererProfile))
+                    || !SignatureCaptureCore.isSupportedRendererProfile(rendererProfile))
                 throw new IOException("Allkirja mustandi metaandmed ei klapi S1 vorminguga");
             validateDraft(draft);
             return draft;
@@ -328,6 +344,7 @@ final class SignatureDraftStore {
         if (!SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(SignatureCaptureCore.geometryObject(points))).equals(draft.geometryHash))
             throw new IOException("Allkirja geomeetria hash ei klapi");
         if (!isPng(draft.pngBytes)) throw new IOException("Allkirja PNG ei ole loetav PNG konteiner");
+        if (!SignatureCaptureCore.isSupportedRendererProfile(draft.rendererProfile)) throw new IOException("Allkirja renderdusprofiili ei tunta");
         if (!"UNIQUE".equals(draft.antiReuseResult) && !"NOT_CHECKED".equals(draft.antiReuseResult)) throw new IOException("Allkirja korduskasutuse tulemus on vigane");
         if (!SignatureCaptureCore.ANTI_REUSE_SCOPE.equals(draft.antiReuseScope)) throw new IOException("Allkirja korduskasutuse ulatus on vigane");
         if ("UNIQUE".equals(draft.antiReuseResult) && (draft.antiReuseRegistryDigest == null || !draft.antiReuseRegistryDigest.matches("[0-9a-f]{64}")))

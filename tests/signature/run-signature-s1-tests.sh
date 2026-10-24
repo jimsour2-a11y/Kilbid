@@ -9,6 +9,10 @@ SOURCES=(
   "$ROOT/app/src/main/java/ee/dold/techcontrol/SignaturePngRenderer.java"
   "$ROOT/app/src/main/java/ee/dold/techcontrol/SignatureDraftStore.java"
   "$ROOT/tests/signature/SignatureCaptureS1Test.java"
+  "$ROOT/tests/signature/SignaturePngPocFixture.java"
 )
 java -m jdk.compiler/com.sun.tools.javac.Main -encoding UTF-8 -d "$OUT" "${SOURCES[@]}"
 java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignatureCaptureS1Test
+if [[ -n "${DTC_S1_5_POC_PNG:-}" ]]; then
+  java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignaturePngPocFixture "$DTC_S1_5_POC_PNG"
+fi

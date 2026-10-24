@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.SystemClock;
@@ -59,6 +60,8 @@ public class MainActivity extends Activity {
     private static final int CAMERA_PERMISSION_REQUEST = 1102;
     private static final int EXPORT_DOCUMENT_REQUEST = 1103;
     private WorkspaceStore workspaceStore;
+    private SignatureDraftStore signatureDraftStore;
+    private SignatureCaptureDialog signatureCaptureDialog;
     private LanSyncTransport lanSyncTransport;
     private boolean darkTheme = false;
     private volatile String lastCameraId;
@@ -87,6 +90,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         workspaceStore = new WorkspaceStore(getFilesDir());
+        signatureDraftStore = new SignatureDraftStore(getFilesDir());
         lanSyncTransport = new LanSyncTransport();
         String savedUri = getPreferences(MODE_PRIVATE).getString("importUri", null);
         if (savedUri != null) importUri = Uri.parse(savedUri);
@@ -179,6 +183,95 @@ public class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private SignatureCaptureCore.DeviceInfo signatureDeviceInfo(String deviceInstanceId) throws Exception {
+        PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+        long versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        return new SignatureCaptureCore.DeviceInfo(deviceInstanceId, info.versionName, versionCode,
+                Build.VERSION.RELEASE, Build.VERSION.SDK_INT);
+    }
+
+    private void showSignatureCapture(SignatureCaptureCore.Target target, SignatureCaptureCore.DeviceInfo device) {
+        if (signatureCaptureDialog != null && signatureCaptureDialog.isShowing()) {
+            sendSignatureCaptureError("Allkirjastamise aken on juba avatud.");
+            return;
+        }
+        try {
+            signatureCaptureDialog = new SignatureCaptureDialog(this, signatureDraftStore, target, device,
+                    new SignatureCaptureDialog.Listener() {
+                        @Override public void onDraftSaved(SignatureCaptureCore.Draft draft) {
+                            JSONObject summary = signatureDraftSummary(draft);
+                            Toast.makeText(MainActivity.this,
+                                    "Allkirja mustand salvestati telefoni. XLSX jäi muutmata.", Toast.LENGTH_LONG).show();
+                            sendSignatureCaptureSaved(summary.toString());
+                            signatureCaptureDialog = null;
+                        }
+                        @Override public void onCaptureCancelled(String reason) {
+                            if (reason != null && reason.contains("suurus muutus")) Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
+                            signatureCaptureDialog = null;
+                        }
+                    });
+            signatureCaptureDialog.show();
+        } catch (Exception e) {
+            signatureCaptureDialog = null;
+            sendSignatureCaptureError(e.getMessage() == null ? "Allkirjastamist ei saanud avada." : e.getMessage());
+        }
+    }
+
+    private JSONObject signatureDraftSummary(SignatureCaptureCore.Draft draft) {
+        JSONObject out = new JSONObject();
+        try {
+            out.put("schemaVersion", draft.schemaVersion);
+            out.put("status", draft.status);
+            out.put("signatureId", draft.signatureId);
+            out.put("targetType", draft.targetType);
+            out.put("recordId", draft.recordId);
+            out.put("recordVersion", draft.recordVersion == null ? JSONObject.NULL : draft.recordVersion);
+            out.put("recordVersionSource", draft.recordVersionSource);
+            out.put("kilpId", draft.kilpId);
+            out.put("signerName", draft.signerName);
+            out.put("captureStartedAtUtcMs", draft.captureStartedAtUtcMs);
+            out.put("captureEndedAtUtcMs", draft.captureEndedAtUtcMs);
+            out.put("captureDurationMs", draft.captureDurationMs);
+            out.put("clockSource", draft.clockSource);
+            out.put("inputMethod", draft.inputMethod);
+            out.put("strokeCount", draft.strokeCount);
+            out.put("pointCount", draft.pointCount);
+            out.put("canvasWidthPx", draft.canvasWidthPx);
+            out.put("canvasHeightPx", draft.canvasHeightPx);
+            out.put("pngHash", draft.pngHash);
+            out.put("strokeHash", draft.strokeHash);
+            out.put("geometryHash", draft.geometryHash);
+            out.put("rendererProfile", draft.rendererProfile);
+            out.put("deviceInstanceId", draft.deviceInstanceId);
+            out.put("appVersionName", draft.appVersionName);
+            out.put("appVersionCode", draft.appVersionCode);
+            out.put("androidRelease", draft.androidRelease);
+            out.put("androidApiLevel", draft.androidApiLevel);
+            out.put("antiReuse", new JSONObject().put("algorithm", "dold-exact-reuse/v1")
+                    .put("result", draft.antiReuseResult).put("scope", draft.antiReuseScope)
+                    .put("checkedAtUtcMs", draft.antiReuseCheckedAtUtcMs)
+                    .put("checkedCount", draft.antiReuseCheckedCount)
+                    .put("registryDigest", draft.antiReuseRegistryDigest)
+                    .put("matchingSignatureIds", new org.json.JSONArray(draft.antiReuseMatchingSignatureIds))
+                    .put("geometryHash", draft.geometryHash));
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    private void sendSignatureCaptureSaved(String json) {
+        if (webView == null) return;
+        String quoted = JSONObject.quote(json == null ? "{}" : json);
+        runOnUiThread(() -> webView.evaluateJavascript("window.onNativeSignatureDraftSaved&&window.onNativeSignatureDraftSaved(" + quoted + ")", null));
+    }
+
+    private void sendSignatureCaptureError(String message) {
+        String safe = message == null ? "Allkirjastamist ei saanud alustada." : message;
+        Toast.makeText(this, safe, Toast.LENGTH_LONG).show();
+        if (webView == null) return;
+        String quoted = JSONObject.quote(safe);
+        runOnUiThread(() -> webView.evaluateJavascript("window.onNativeSignatureCaptureError&&window.onNativeSignatureCaptureError(" + quoted + ")", null));
     }
 
 
@@ -567,6 +660,29 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String listWorkspaces(){try{return WorkspaceStore.ok(workspaceStore.list());}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String listWorkspaceErrors(){try{return WorkspaceStore.ok(workspaceStore.listErrors());}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String hashBytes(String base64){try{return WorkspaceStore.hash(Base64.decode(base64,Base64.DEFAULT));}catch(Exception e){throw new IllegalStateException(e);}}
+        @JavascriptInterface public boolean startSignatureCapture(String targetJson){
+            try {
+                if(targetJson==null||targetJson.length()>16_384)throw new IllegalArgumentException("Allkirja sihtandmed on vigased");
+                JSONObject value=new JSONObject(targetJson);
+                Object rawVersion=value.opt("recordVersion");Long recordVersion=null;
+                if(rawVersion instanceof Number){double numeric=((Number)rawVersion).doubleValue();if(Double.isFinite(numeric)&&numeric>=0&&numeric==Math.rint(numeric)&&numeric<=Long.MAX_VALUE)recordVersion=(long)numeric;}
+                JSONObject metadata=value.optJSONObject("metadata");Map<String,String> metadataValues=new HashMap<>();
+                if(metadata!=null){java.util.Iterator<String> keys=metadata.keys();while(keys.hasNext()){String key=keys.next();Object item=metadata.opt(key);if(item instanceof String||item instanceof Number||item instanceof Boolean)metadataValues.put(key,String.valueOf(item));}}
+                SignatureCaptureCore.Target target=new SignatureCaptureCore.Target(
+                        value.optString("targetType",""),value.optString("recordId",""),value.optString("kilpId",""),
+                        value.optString("signerName",""),recordVersion,value.optString("recordVersionSource","UNRESOLVED"),metadataValues);
+                SignatureCaptureCore.DeviceInfo device=signatureDeviceInfo(value.optString("deviceInstanceId",""));
+                runOnUiThread(()->showSignatureCapture(target,device));
+                return true;
+            } catch(Exception e) {
+                runOnUiThread(()->sendSignatureCaptureError(e.getMessage()==null?"Allkirja sihtandmed on vigased":e.getMessage()));
+                return false;
+            }
+        }
+        @JavascriptInterface public String listSignatureDrafts(){
+            try{org.json.JSONArray result=new org.json.JSONArray();for(SignatureCaptureCore.Draft draft:signatureDraftStore.listDrafts())result.put(signatureDraftSummary(draft));return WorkspaceStore.ok(result);}
+            catch(Exception e){return WorkspaceStore.error(e);}
+        }
         @JavascriptInterface public String startLanSyncSession(String dbId,String responseBase64){
             try {
                 byte[] response=decodeLanPayload(responseBase64);
@@ -768,6 +884,11 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (signatureCaptureDialog != null && signatureCaptureDialog.isShowing()) {
+            signatureCaptureDialog.cancelFromLifecycle();
+            signatureCaptureDialog = null;
+            return;
+        }
         if (scannerActive) {
             closeQrScanner(false);
             return;
@@ -781,6 +902,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (signatureCaptureDialog != null) {
+            signatureCaptureDialog.cancelFromLifecycle();
+            signatureCaptureDialog = null;
+        }
         closeQrScanner(false);
         closePendingExportQuietly();
         if(lanSyncTransport!=null)lanSyncTransport.close();

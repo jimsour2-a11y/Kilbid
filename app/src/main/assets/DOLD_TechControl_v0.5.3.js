@@ -800,7 +800,47 @@ async function viewSavedInspection(id,record,entry){
   const ratings=CHECKS.map(([col,label])=>{const value=record.ratings?.[col]??'',shown=value===''?'–':String(value);return `${esc(label)}: <b>${esc(shown)} — ${esc(scoreLabel(value))}</b>`;}).join('<br>');
   const linkedRows=new Set(entry?.defectRows||[]),defects=TC.allDefects.filter(d=>d.id===id&&(linkedRows.has(d.row)||TC.sync?.entities?.Puudus?.[d.syncId]?.values?.kontrollId===record.syncId));
   const defectHtml=defects.length?defects.map(d=>`• ${esc(d.point||'Puudus')}: ${esc(d.desc||'')} — ${esc(d.closed?'Kõrvaldatud':'Avatud')}`).join('<br>'):'Puuduseid pole seotud';
-  await showAppChoice('VAATA KONTROLLI',`<b>${esc(id)} • ${esc(cabinetTitle(S.selected))}</b><br>Kontrollitud: ${esc(inspectionStamp(record))}<br>Kontrollija: ${esc(record.inspector||'—')}<div class="topgap">${ratings}</div><div class="topgap"><b>Puudused (${defects.length})</b><br>${defectHtml}</div>`,[{value:'back',label:'TAGASI',primary:true}]);
+  const choice=await showAppChoice('VAATA KONTROLLI',`<b>${esc(id)} • ${esc(cabinetTitle(S.selected))}</b><br>Kontrollitud: ${esc(inspectionStamp(record))}<br>Kontrollija: ${esc(record.inspector||'—')}<div class="topgap">${ratings}</div><div class="topgap"><b>Puudused (${defects.length})</b><br>${defectHtml}</div>`,[{value:'signature',label:'ALLKIRJA MUSTAND'},{value:'back',label:'TAGASI',primary:true}]);
+  if(choice==='signature')return startKontrollSignatureDraft(record);
+}
+function draftKontrollRecordVersion(record){
+  const id=persistentSyncId('Kontroll',record?.syncId||record?.persistentId),entity=id?TC.sync?.entities?.Kontroll?.[id]:null,revision=Number(entity?.revision);
+  if(!entity||!Number.isSafeInteger(revision)||revision<1||!entity.values)return {recordVersion:null,recordVersionSource:'UNRESOLVED'};
+  let current;try{current=syncControlValues({...record,syncId:id});}catch(e){return {recordVersion:null,recordVersionSource:'UNRESOLVED'};}
+  const currentKeys=Object.keys(current),storedKeys=Object.keys(entity.values);
+  if(currentKeys.length!==storedKeys.length||currentKeys.some(key=>!fieldValueEqual(current[key]??null,entity.values[key]??null)))return {recordVersion:null,recordVersionSource:'UNRESOLVED'};
+  return {recordVersion:revision,recordVersionSource:'SEMANTIC_REVISION_SCHEMA1'};
+}
+function startNativeSignatureCapture(target){
+  if(!window.Android||typeof Android.startSignatureCapture!=='function'){toast('Allkirja mustand vajab Androidi rakendust.');return false;}
+  const payload={...target,deviceInstanceId:TC.deviceId||installationDeviceId()};
+  try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){toast('Allkirja mustandit ei saanud alustada.');return false;}return true;}
+  catch(e){toast('Allkirja mustandit ei saanud alustada.');return false;}
+}
+function startKontrollSignatureDraft(record){
+  const id=persistentSyncId('Kontroll',record?.syncId||record?.persistentId);if(!id){toast('Sellel kontrollil puudub püsiv KontrollID.');return false;}
+  const version=draftKontrollRecordVersion({...record,syncId:id});
+  return startNativeSignatureCapture({targetType:'Kontroll',recordId:id,kilpId:record.id,signerName:record.inspector,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,metadata:{workbookIdentity:TC.dbId||'',inspectionDate:record.date||'',inspectorName:record.inspector||''}});
+}
+function startParandusSignatureDraft(record){
+  const recordId=String(record?.recordId||record?.parandusId||'').trim(),rawVersion=record?.recordVersion??record?.version??null,version=Number(rawVersion),knownVersion=Number.isSafeInteger(version)&&version>=1;
+  return startNativeSignatureCapture({targetType:'Parandus',recordId,kilpId:record?.kilpId||record?.cabinetId||'',signerName:record?.signerName||record?.performedBy||'',recordVersion:knownVersion?version:null,recordVersionSource:knownVersion?'PARANDUSED_L':'UNRESOLVED',metadata:{workbookIdentity:TC.dbId||'',puudusId:record?.puudusId||'',kontrollId:record?.kontrollId||''}});
+}
+window.startDoldSignatureCapture=startNativeSignatureCapture;
+window.startDoldParandusSignatureDraft=startParandusSignatureDraft;
+function onNativeSignatureDraftSaved(raw){
+  try{const draft=typeof raw==='string'?JSON.parse(raw):raw;toast('Allkirja mustand salvestati telefoni. XLSX jäi muutmata.',4000);refreshSignatureDrafts();return draft;}
+  catch(e){toast('Allkirja mustand salvestati, kuid kokkuvõtet ei saanud kuvada.',4000);}
+}
+function onNativeSignatureCaptureError(message){toast(message||'Allkirjastamist ei saanud alustada.',4500);}
+function refreshSignatureDrafts(){
+  const host=$('signatureDraftList');if(!host)return;
+  if(!window.Android||typeof Android.listSignatureDrafts!=='function'){host.innerHTML='<div class="small">Allkirja mustandid on Androidi lokaalses salvestuses.</div>';return;}
+  try{
+    const result=JSON.parse(Android.listSignatureDrafts());if(!result.ok)throw Error(result.error||'Mustandeid ei saanud lugeda');
+    const drafts=Array.isArray(result.data)?result.data:[];
+    host.innerHTML=drafts.slice().reverse().map(d=>`<div class="miniDef"><b>${esc(d.targetType)} • ${esc(d.kilpId)} • ${esc(d.status)}</b><div>${esc(d.signerName)} • ${esc(localDateTime(d.captureEndedAtUtcMs))}</div><div class="small">${esc(d.recordId)} • ${esc(d.antiReuse?.result||'NOT_CHECKED')} (${esc(d.antiReuse?.scope||'LOCAL_KNOWN_DATA')})</div></div>`).join('')||'<div class="small">Salvestatud allkirja mustandeid pole.</div>';
+  }catch(e){host.innerHTML=`<div class="badge warn">${esc(e.message||'Allkirja mustandeid ei saanud lugeda.')}</div>`;}
 }
 async function openCab(id,source='list',duplicateAction='prompt'){
   if(TC.busy)return;if(!TC.ready||!TC.cycle){showTab('home');renderCyclePanel();toast('Vali JÄTKA KONTROLLI või alusta uut kontrolli');return;}

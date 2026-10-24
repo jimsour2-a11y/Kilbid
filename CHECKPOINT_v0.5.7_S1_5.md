@@ -1,0 +1,65 @@
+# DOLD TechControl v0.5.7 — S1.5 checkpoint
+
+## DONE
+
+- Continued from the S1 checkpoint on `foundation-v0.5.7`; the prior S1.5 base was `99bcea4`. No push or merge to `main` was made.
+- Replaced the unsuitable schema-1 semantic entity revision as the Kontroll signature version source. Permanent `KontrollID` plus the canonical typed signed-field snapshot now supplies `recordVersion`; row number is only a lookup cache, and unsupported/missing/duplicate/legacy-no-ID records stay `UNRESOLVED`.
+- Added the selected S2-candidate normalized-stroke renderer profile, golden PNG vector, exact local anti-reuse rule, and production candidate `Allkirjad!T/G` formula generation. XLSX score values, semantic sync protocol, LAN protocol, and production acceptance were not changed.
+- Created a separate test-only Picture-in-Cell POC copy from the pinned R4 v0.9.0 workbook. The source workbook remains byte-identical.
+- Added architecture notes, the Excel Desktop checklist, and the detailed test report.
+- Implementation commit: `e640aa182450f3822500a460da55d16cd563b652` (`Add S1.5 signature versioning and XLSX POC`).
+
+## Root cause: Kontroll recordVersion
+
+The old capture path depended on schema-1 semantic sync `entity.revision` and exact equality between its normalized `entity.values` and current record values. `ensureSyncState()` could hydrate values for an existing record without a positive revision, while the sync projection normalizes values and does not represent the exact typed signature snapshot. Thus it could not prove the signature's protected fields had a stable version after migration/reimport; it returned `UNRESOLVED` or relied on an incomplete comparison. The new local metadata map is independent of semantic sync entity revisions and uses only permanent `KontrollID` plus typed protected fields. No sync schema or LAN protocol change was needed.
+
+## XLSX POC
+
+- Source: `DOLD_TechControl_allkirjad_prototuup_v0.9.0_R4_checkpoint.xlsx`
+- Source SHA-256: `dc4cdb2beefb4502c9a75441d4042160e8619c33959a932b37daa433f45c4e57`
+- Source size: 1,907,932 bytes
+- Output: `DOLD_TechControl_allkirjad_prototuup_v0.9.0_S1_5_PICTURE_POC.xlsx`
+- Output SHA-256: `74034d1e4e8a13fe76e64c1af9d02ad79d96c6b1e727759bd7f422a5390c32e5`
+- Output size: 1,908,941 bytes
+- Test media: `xl/media/image7.png`, 900×300, PNG SHA-256 `ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f`
+- The POC is marked `TEST POC — NOT A SIGNATURE`, adds a new `Allkirjade pildid` row 9, leaves reserved F8 unchanged, and does not modify `Allkirjad` or any production pointer.
+- Structural verification: 14 sheet names retained; 55/55 source parts retained; 56 total output parts; 43/43 internal relationships resolve; 10 drawing parts and 10 existing media items are byte-identical. Rich Data and metadata indexes are consistent, the PNG hash matches G9, and H9 points to the new media part.
+- Actual baseline in the supplied fixture: 82 persistent KontrollID values, 145 Puudused rows, 143 PuudusID values, S23/S25 blank, 141 existing Puudused T links, and 22 `UNRESOLVED` / `LEGACY MATCH ONLY` markers. All compared unchanged after the POC. The older expected counts 81/144/142 did not match this supplied file.
+- Original R4 source was verified byte-identical after POC generation.
+
+## VERIFIED
+
+| Test set | Result |
+|---|---:|
+| Expanded full headless suite (R3 cycle enabled, S1.5 included) | **152/152 PASS** |
+| S1.5 focused recordVersion / legacy / G-T formulas | **3/3 PASS** |
+| R1 package routing / handoff | **10/10 PASS** |
+| R1 persistent-ID hydration | **1/1 PASS** |
+| R2 persistent-ID | **2/2 PASS** |
+| R2 native LAN | **23/23 PASS** |
+| R3 cycle identity | **7/7 PASS** |
+| R3 QR/bootstrap | **38/38 PASS** |
+| R4 scoring | **10/10 PASS** |
+| R4 semantic sync | **46/46 PASS** |
+| R4 native LAN | **4/4 PASS** |
+| R5 sync safety | **98/98 PASS** |
+| R5 XLSX preservation round-trip | **31/31 PASS** |
+| R5 responsive modal contract | **8/8 PASS** |
+| v0.5.6.1 field-fix JS/native | **11/11 + 4/4 PASS** |
+| S1 native core/draft store | **30/30 PASS** |
+| S1 UI/source contract | **15/15 PASS** |
+| JavaScript syntax and `git diff --check` | **PASS** |
+
+The earlier R5 legacy regression baseline remains 130/130 PASS; the current expanded full headless run passed 152/152 with no failed assertions and no weakened tests.
+
+## BLOCKER / LIMITATIONS
+
+- **Microsoft Excel Desktop: NOT TESTED.** The POC must be opened, selected, saved, closed, and reopened in Excel using `S1_5_EXCEL_DESKTOP_CHECKLIST.md`.
+- **Physical Android: NOT TESTED.** New renderer and capture behavior still need a real-phone check.
+- **APK BUILD NOT TESTED.** Android SDK, Gradle, `adb`, `ANDROID_HOME`, and `ANDROID_SDK_ROOT` are unavailable. Package remains `ee.dold.techcontrol`, version remains `0.5.6.1` / code 57.
+- Cross-device PNG byte identity is not guaranteed because platform zlib/Deflater output may differ. Geometry/pixels are fixed; each draft hashes the exact generated bytes.
+- The existing v0.8.3 direct baseline remains 1,771,056 bytes, 722,480 bytes over the unchanged 1 MiB LAN limit. No transport changes were made.
+
+## NEXT
+
+Do not start S2 automatically. First complete the Excel Desktop POC check and physical Android renderer check. S2 may begin only after the production signature workbook/schema is confirmed; it should then validate the S1 draft and write record snapshot/hash, capture proof/hash, Allkirjad and Allkirja_jaljed rows, Picture-in-Cell media, the appropriate pointer, and final `Kehtiv` status as one verified transaction.

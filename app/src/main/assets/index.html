@@ -263,6 +263,7 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
   </div>
  </div>
  <div id="defList"></div>
+ <div class="card"><div class="space"><div><div class="big">Hiljuti tehtud tööd</div><div class="small">Paranduse allkirja saab lisada ka hiljem.</div></div></div><div id="repairHistoryList" class="topgap"></div></div>
 </section>
 
 <section id="repairTab" class="hidden">
@@ -924,6 +925,10 @@ function renderDefects(){
     <div class="repairActions"><button class="primary" onclick="openDefectRepair(${d.row})">PARANDA / SULGE</button></div>
    </div>`;
  }).join("")||'<div class="card">Selle filtriga avatud puudusi ei ole.</div>';
+ const repairHost=$("repairHistoryList");if(repairHost){
+   const repairs=(TC.parandused||[]).filter(r=>["Suletud","Osaline"].includes(r.workStatus)).slice().sort((a,b)=>(Number(b.performedAt)||0)-(Number(a.performedAt)||0)).slice(0,10);
+   repairHost.innerHTML=repairs.map(r=>`<div class="miniDef"><div class="space"><b>${esc(r.kilpId)} • ${esc(r.performedBy||"—")}</b><span class="badge ${r.signatureId&&r.signatureStatus==="Kehtiv"?"ok":"warn"}">${esc(r.signatureId&&r.signatureStatus==="Kehtiv"?"Kehtiv":"Allkiri puudub")}</span></div><div class="small">${esc(r.recordId)} • ${esc(parandusDateTimeLabel(r.performedAt))}</div><div class="small">${esc(r.workText||"")}</div><button class="topgap" onclick="viewParandus('${esc(r.recordId)}')">VAATA PARANDUST / ALLKIRI</button></div>`).join("")||'<div class="small">Lõpetatud parandusi veel pole.</div>';
+ }
  updateTop();
 }
 function openDefectRepair(row){

@@ -1011,11 +1011,13 @@ async function s2ValidateDraft(draft){
   const start=Number(draft.captureStartedAtUtcMs),end=Number(draft.captureEndedAtUtcMs),duration=Number(draft.captureDurationMs);
   if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||!Number.isSafeInteger(duration)||start<0||end<=start||duration<=0||Math.abs((end-start)-duration)>5000)throw s2SignatureBlock('CLOCK_INCONSISTENT','Seadme kella ja monotoonse allkirja kestuse erinevus on liiga suur.');
   if(!draft.antiReuse||draft.antiReuse.algorithm!=='dold-exact-reuse/v1'||draft.antiReuse.scope!=='LOCAL_KNOWN_DATA'||draft.antiReuse.result!=='UNIQUE'||!Number.isSafeInteger(Number(draft.antiReuse.checkedAtUtcMs))||Number(draft.antiReuse.checkedAtUtcMs)<=0||!Number.isSafeInteger(Number(draft.antiReuse.checkedCount))||Number(draft.antiReuse.checkedCount)<0||!/^[0-9a-f]{64}$/.test(String(draft.antiReuse.registryDigest||''))||(draft.antiReuse.matchingSignatureIds||[]).length)throw s2SignatureBlock('REUSE_NOT_CHECKED','Kohaliku korduskasutuse kontroll ei kinnitanud allkirja. Mustand jäi telefoni.');
+  const canvasWidthPx=draft.canvasWidthPx,canvasHeightPx=draft.canvasHeightPx;
+  if(!Number.isSafeInteger(canvasWidthPx)||!Number.isSafeInteger(canvasHeightPx)||canvasWidthPx<2||canvasHeightPx<2||canvasWidthPx*canvasHeightPx>4000000)throw s2SignatureBlock('STROKES_INVALID','Allkirja native canvas mõõtmed on vigased.');
   const {strokes,geometry}=s2BuildStrokes(draft),strokeHash=await digest(new TextEncoder().encode(signatureCanonicalJson(strokes))),geometryHash=await digest(new TextEncoder().encode(signatureCanonicalJson(geometry)));
   if(strokeHash!==draft.strokeHash||geometryHash!==draft.geometryHash)throw s2SignatureBlock('HASH_MISMATCH','Allkirja puutepunktide kontrollsumma ei klapi.');
   const png=decode64(String(draft.pngBase64||'')),dimensions=s2PngDimensions(png),pngHash=await digest(png);
   if(dimensions.width!==900||dimensions.height!==300||pngHash!==draft.pngHash)throw s2SignatureBlock('HASH_MISMATCH','Allkirja PNG mõõtmed või kontrollsumma ei klapi.');
-  if(Number(draft.canvasWidthPx)!==900||Number(draft.canvasHeightPx)!==300||Number(draft.strokeCount)!==strokes.points.reduce((m,p)=>Math.max(m,p[0]),0)||Number(draft.pointCount)!==strokes.points.length)throw s2SignatureBlock('STROKES_INVALID','Allkirja canvas või punktide arv ei klapi.');
+  if(Number(draft.strokeCount)!==strokes.points.reduce((m,p)=>Math.max(m,p[0]),0)||Number(draft.pointCount)!==strokes.points.length)throw s2SignatureBlock('STROKES_INVALID','Allkirja joonte või punktide arv ei klapi.');
   return {draft,metadata,strokes,geometry,png,recordHash:null,recordSnapshot:null,proof:null,proofHash:null,antiReuse:null};
 }
 function s2ResolvePart(sourcePart,target){

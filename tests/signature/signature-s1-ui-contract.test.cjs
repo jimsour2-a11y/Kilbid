@@ -20,6 +20,7 @@ function check(name, condition) {
 
 check('capture uses a native Android View and MotionEvent', /class SignaturePadView extends View/.test(pad) && /onTouchEvent\(MotionEvent event\)/.test(pad));
 check('capture accepts finger input only', /event\.getToolType\(0\) != MotionEvent\.TOOL_TYPE_FINGER/.test(pad));
+check('touch interception is requested through the parent ViewParent', /private void setParentInterceptBlocked\(boolean blocked\)[\s\S]*?getParent\(\)\.requestDisallowInterceptTouchEvent\(blocked\)/.test(pad) && !/\brequestDisallowInterceptTouchEvent\(/.test(pad.replace(/getParent\(\)\.requestDisallowInterceptTouchEvent\(/g, '')) && (pad.match(/setParentInterceptBlocked\(false\)/g) || []).length === 3 && /setParentInterceptBlocked\(true\)/.test(pad));
 check('historical touch samples are retained', /getHistorySize\(\)/.test(pad) && /getHistoricalX\(0, i\)/.test(pad) && /getHistoricalY\(0, i\)/.test(pad));
 check('ACTION_CANCEL discards the active stroke', /ACTION_CANCEL[\s\S]*?cancelCurrentStroke\(\)/.test(pad) && /void cancelCurrentStroke\(\)/.test(core));
 check('touch preview is drawn from normalized raw strokes', /for \(java\.util\.List<SignatureCaptureCore\.Point> stroke/.test(pad) && /canvas\.drawPath\(path, paint\)/.test(pad));

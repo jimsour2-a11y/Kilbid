@@ -41,6 +41,12 @@ final class SignaturePadView extends View {
 
     void setListener(Listener listener) { this.listener = listener; }
 
+    private void setParentInterceptBlocked(boolean blocked) {
+        if (getParent() != null) {
+            getParent().requestDisallowInterceptTouchEvent(blocked);
+        }
+    }
+
     @Override protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         if (width < 2 || height < 2 || session == null || session.isCancelled()) return;
@@ -85,7 +91,7 @@ final class SignaturePadView extends View {
         try {
             if (action == MotionEvent.ACTION_DOWN) {
                 if (event.getToolType(0) != MotionEvent.TOOL_TYPE_FINGER) return false;
-                requestDisallowInterceptTouchEvent(true);
+                setParentInterceptBlocked(true);
                 requestFocus();
                 session.beginStroke(event.getX(0), event.getY(0), elapsed);
                 invalidate();
@@ -104,14 +110,14 @@ final class SignaturePadView extends View {
                 for (int i = 0; i < event.getHistorySize(); i++)
                     session.addPoint(event.getHistoricalX(0, i), event.getHistoricalY(0, i), elapsed);
                 session.endStroke(event.getX(0), event.getY(0), elapsed);
-                requestDisallowInterceptTouchEvent(false);
+                setParentInterceptBlocked(false);
                 invalidate();
                 if (listener != null) listener.onStrokeChanged();
                 return true;
             }
             if (action == MotionEvent.ACTION_CANCEL) {
                 session.cancelCurrentStroke();
-                requestDisallowInterceptTouchEvent(false);
+                setParentInterceptBlocked(false);
                 invalidate();
                 if (listener != null) listener.onStrokeChanged();
                 return true;
@@ -119,7 +125,7 @@ final class SignaturePadView extends View {
             if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP) return true;
             return session.hasActiveStroke();
         } catch (IllegalStateException e) {
-            requestDisallowInterceptTouchEvent(false);
+            setParentInterceptBlocked(false);
             if (listener != null) listener.onCaptureInvalidated(e.getMessage() == null ? "Allkirjastamine katkestati." : e.getMessage());
             return false;
         }

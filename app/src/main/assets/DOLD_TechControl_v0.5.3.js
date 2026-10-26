@@ -19,6 +19,7 @@ function persistentSyncId(type,value){
 }
 function newPersistentSyncId(type){const prefix={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-'}[type];if(!prefix)throw Error('Tundmatu püsiva ID liik.');return prefix+uid();}
 let appDialogResolve=null;
+let pendingPostSaveSignatureNavigation=null;
 function cloneWorkbook(zip){const copy=zip.clone();copy.files={...zip.files};return copy;}
 function uid(){const a=new Uint32Array(4);crypto.getRandomValues(a);return [...a].map(n=>n.toString(16).padStart(8,'0')).join('');}
 function installationDeviceId(){
@@ -895,18 +896,29 @@ function signatureEffectiveStatusFormula(targetType,row){
   const checks=SIGNATURE_SNAPSHOT_FIELDS[targetType].map(([sourceCol,snapshotCol])=>signatureTypedMatchFormula(`INDEX(${sheet}!$${sourceCol}$5:$${sourceCol}$500,$T${row})`,`$${snapshotCol}${row}`));
   return `=IFERROR(IF($F${row}=\"Tühistatud\",\"Tühistatud\",IF(OR($T${row}=\"\",NOT(ISNUMBER($T${row}))),\"Tühistatud\",IF(AND($F${row}=\"Kehtiv\",${checks.join(',')}),\"Kehtiv\",\"Tühistatud\"))),\"Tühistatud\")`;
 }
+function finishPendingPostSaveSignatureNavigation(){
+  const pending=pendingPostSaveSignatureNavigation;if(!pending)return false;
+  pendingPostSaveSignatureNavigation=null;
+  if(pending.goNext)openNextCabinet(pending.cabinetId);else showTab('cab');
+  return true;
+}
+function completePostSaveSignatureWithoutDraft(reason){
+  if(!pendingPostSaveSignatureNavigation)return false;
+  toast(`Kontroll salvestatud. Allkirja mustand jäi lisamata.${reason?' '+reason:''}`,5000);
+  finishPendingPostSaveSignatureNavigation();return true;
+}
 function startNativeSignatureCapture(target){
-  if(!window.Android||typeof Android.startSignatureCapture!=='function'){toast('Allkirja mustand vajab Androidi rakendust.');return false;}
+  if(!window.Android||typeof Android.startSignatureCapture!=='function'){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise aken pole saadaval.'))toast('Allkirja mustand vajab Androidi rakendust.');return false;}
   const payload={...target,deviceInstanceId:TC.deviceId||installationDeviceId()};
-  try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){toast('Allkirja mustandit ei saanud alustada.');return false;}return true;}
-  catch(e){toast('Allkirja mustandit ei saanud alustada.');return false;}
+  try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}return true;}
+  catch(e){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}
 }
 async function startKontrollSignatureDraft(record){
   const id=persistentSyncId('Kontroll',record?.persistentId||record?.syncId);if(!id){toast('Sellel kontrollil puudub püsiv KontrollID.');return false;}
   try{
     const version=await draftKontrollRecordVersion(record);await persistWorkspace();
     return startNativeSignatureCapture({targetType:'Kontroll',recordId:id,kilpId:record.id,signerName:record.inspector,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,metadata:{workbookIdentity:TC.dbId||'',inspectionDate:record.date||'',inspectorName:record.inspector||'',recordVersionSnapshotHash:version.recordVersionSnapshotHash||''}});
-  }catch(e){toast('Allkirja kirjeversiooni ei saanud telefoni salvestada. XLSX jäi muutmata.');return false;}
+  }catch(e){if(!completePostSaveSignatureWithoutDraft('Allkirja mustandit ei saanud telefoni salvestada. XLSX jäi muutmata.'))toast('Allkirja kirjeversiooni ei saanud telefoni salvestada. XLSX jäi muutmata.');return false;}
 }
 function startParandusSignatureDraft(record){
   const recordId=String(record?.recordId||record?.parandusId||'').trim(),rawVersion=record?.recordVersion??record?.version??null,version=Number(rawVersion),knownVersion=Number.isSafeInteger(version)&&version>=1;
@@ -915,10 +927,19 @@ function startParandusSignatureDraft(record){
 window.startDoldSignatureCapture=startNativeSignatureCapture;
 window.startDoldParandusSignatureDraft=startParandusSignatureDraft;
 function onNativeSignatureDraftSaved(raw){
-  try{const draft=typeof raw==='string'?JSON.parse(raw):raw;toast('Allkirja mustand salvestati telefoni. XLSX jäi muutmata.',4000);refreshSignatureDrafts();return draft;}
+  let draft;
+  try{draft=typeof raw==='string'?JSON.parse(raw):raw;toast('Allkirja mustand salvestati telefoni. XLSX jäi muutmata.',4000);}
   catch(e){toast('Allkirja mustand salvestati, kuid kokkuvõtet ei saanud kuvada.',4000);}
+  refreshSignatureDrafts();finishPendingPostSaveSignatureNavigation();return draft;
 }
-function onNativeSignatureCaptureError(message){toast(message||'Allkirjastamist ei saanud alustada.',4500);}
+function onNativeSignatureCaptureCancelled(reason){
+  if(completePostSaveSignatureWithoutDraft(''))return;
+  if(reason&&String(reason).includes('suurus muutus'))toast(reason,4500);
+}
+function onNativeSignatureCaptureError(message){
+  if(completePostSaveSignatureWithoutDraft(message?`Allkirjastamise aken ei avanenud: ${message}`:'Allkirjastamise aken ei avanenud.'))return;
+  toast(message||'Allkirjastamist ei saanud alustada.',4500);
+}
 function refreshSignatureDrafts(){
   const host=$('signatureDraftList');if(!host)return;
   if(!window.Android||typeof Android.listSignatureDrafts!=='function'){host.innerHTML='<div class="small">Allkirja mustandid on Androidi lokaalses salvestuses.</div>';return;}
@@ -1042,7 +1063,14 @@ async function saveInspection(goNext=false){
     if(TC.guard.pending&&opened.proved){TC.guard.pending=null;TC.guard.remaining=randomGap();}else if(!opened.proved&&!wasEdit)TC.guard.remaining=Math.max(1,TC.guard.remaining-1);
     S.inspector=inspector;S.dirty=true;
   });
-  if(ok){stopInspectionTimer();TC.opened=null;toast(`${c.id} ${wasEdit?'muudatused ':''}salvestatud telefoni • ${Math.round(duration)} s`);if(goNext)openNextCabinet(c.id);else showTab('cab');}
+  if(ok){
+    stopInspectionTimer();TC.opened=null;toast(`${c.id} ${wasEdit?'muudatused ':''}salvestatud telefoni • ${Math.round(duration)} s`);
+    const controlId=persistentSyncId('Kontroll',TC.cycle?.entries?.[c.id]?.kontrollId),savedRecord=controlId?TC.records.find(r=>r.id===c.id&&r.syncId===controlId):null;
+    if(!savedRecord){toast('Kontroll salvestatud. Allkirja mustand jäi lisamata, sest salvestatud KontrollID kirjet ei leitud.',5000);if(goNext)openNextCabinet(c.id);else showTab('cab');return;}
+    pendingPostSaveSignatureNavigation={cabinetId:c.id,controlId,goNext:!!goNext};
+    const started=await startKontrollSignatureDraft(savedRecord);
+    if(!started&&pendingPostSaveSignatureNavigation)completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.');
+  }
 }
 async function saveCabinetStatus(){if(TC.busy||!S.selected)return;const c=S.selected,status=$('cabStatus').value;if(await transaction(async()=>{const sum=await loadDoc('Kokkuvõte');setInline(sum,'H',c.row,status);S.zip.file(S.paths['Kokkuvõte'],xmlStr(sum));S.dirty=true;})){TC.opened=null;showTab('cab');toast(c.id+' staatus salvestatud telefoni');}}
 async function saveRepair(){

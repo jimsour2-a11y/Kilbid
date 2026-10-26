@@ -118,7 +118,7 @@ async function openCabWithChoices(id,source='list',choices=['edit'],inspectDialo
 function advance(s){clock.mono+=s*1000;clock.offset+=s*1000;}
 async function count(sheet){return run(`(async()=>{const d=await loadDoc(${JSON.stringify(sheet)});return qsa(d,'row').filter(r=>Number(r.getAttribute('r'))>=5&&getCellVal(d,'B',Number(r.getAttribute('r')))).length;})()`);}
 async function freshWorkspace(label,bytes){const dir=path.join(out,label);fs.rmSync(dir,{recursive:true,force:true});fs.mkdirSync(dir,{recursive:true});storeDir=dir;env=makeContext();await run('TC.startupTask');await importBytes(bytes,label+'.xlsx');return dir;}
-async function saveTestInspection(id,desc=''){await run('openCab('+JSON.stringify(id)+')');el('inspector').value='Stage 12 tester';run('setAllScores(4)');if(desc)run(`S.stagedDefects=[{point:'Stage 12',desc:${JSON.stringify(desc)},grade:'C',repeat:'Ei',owner:'Stage 12 tester',due:plusDays(today(),30)}]`);advance(61);await run('saveInspection()');}
+async function saveTestInspection(id,desc=''){await run('openCab('+JSON.stringify(id)+')');el('inspector').value='Stage 12 tester';run('setAllScores(4)');if(desc)run(`S.stagedDefects=[{point:'Stage 12',desc:${JSON.stringify(desc)},grade:'C',repeat:'Ei',owner:'Stage 12 tester',due:plusDays(today(),30)}]`);advance(61);await run('saveInspection()');if(run('pendingPostSaveSignatureNavigation'))run("onNativeSignatureCaptureCancelled('test helper cancel')");env.signatureStartCalls.length=0;}
 function assertR4VisibleScore(value,label){assert.equal(run(`scoreLabel(${JSON.stringify(value)})`),label);run('renderRatings()');const mark=value===''?'–':String(value);assert(el('scoreLegend').innerHTML.includes(`<b>${mark}</b><span>${label}</span>`));assert.equal(el('scoreHint').textContent,'– = Ei rakendu, 0 = Ei ole / puudub.');}
 async function r3Prepare(label,workbookBytes,n=4,firstDefect=false){await freshWorkspace(label,workbookBytes);run('TC.guard.remaining=100');await run('resetRingProgress()');const ids=run(`activeCabinets().slice(0,${n}).map(c=>c.id)`);for(let i=0;i<ids.length;i++)await saveTestInspection(ids[i],firstDefect&&i===0?'R3 linked defect':'');return {ids,cycle:JSON.parse(JSON.stringify(run('TC.cycle'))),snapshot:JSON.parse(JSON.stringify(await run('storeCall("get",TC.dbId)'))),controls:await count('Kontrollid'),defects:await count('Puudused')};}
 const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),legacyR3=testFilter.includes('r3 legacy'),r3CycleCase=/^r3 (stale cycle|fuller incoming cycle|identical cycle entries|missing incoming cycle metadata|row movement and rounded excel w|additional kontrollids|legacy cycle adopts)/i.test(name),r3BootstrapCase=/^r3 (pairing|qr |parser|host |empty startup|scan button|malformed scanned qr|non-direct|direct client|direct baseline|imported baseline|corrupt remote|wrong lineage|user can cancel|phone with|direct initialization|dold flow)/i.test(name),r5XlsxCase=name.startsWith('R5 XLSX preservation'),focusedSetup=(testFilter.includes('r1 package')||testFilter.includes('r1 persistent id')||testFilter.startsWith('r2')||(testFilter.includes('r3')&&!legacyR3)||testFilter.includes('r4 scoring')||testFilter.includes('r5 xlsx preservation')||testFilter.includes('s1 signature'))&&name.startsWith('A import'),groupSelection=(testFilter==='r3 cycle'&&r3CycleCase)||(testFilter==='r3 qr bootstrap'&&r3BootstrapCase);if(r3CycleCase&&!testFilter&&process.env.DTC_RUN_R3!=='1')return;if(r5XlsxCase&&!testFilter.includes('r5 xlsx preservation'))return;if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!focusedSetup&&!groupSelection&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!focusedSetup)results.push({name,status:'PASS'});console.log(focusedSetup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
@@ -934,6 +934,57 @@ await test('S1 signature capture launches from a saved Kontroll and freezes its 
   assert.equal(payload.targetType,'Kontroll');assert.equal(payload.recordId,record.syncId);assert.equal(payload.kilpId,record.id);assert.equal(payload.signerName,record.inspector);
   assert.equal(payload.recordVersion,exact.recordVersion);assert.equal(payload.recordVersionSource,'KONTROLL_SNAPSHOT_METADATA_V1');assert.equal(payload.metadata.recordVersionSnapshotHash,exact.recordVersionSnapshotHash);assert.equal(payload.metadata.workbookIdentity,run('TC.dbId'));
   assert.equal(payload.deviceInstanceId,run('TC.deviceId'));assert.equal(run('TC.revision'),savedRevision+1);assert.equal(run('TC.records.length'),savedRows);
+ }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
+});
+await test('S1.5 post-save signature flow targets saved KontrollID and defers navigation through confirm, cancel, and failure',async()=>{
+ const priorEnv=env,priorStore=storeDir,priorClock={...clock};try{
+  const signatureBytes=process.env.DTC_S1_5_SIGNATURE_FIXTURE?fs.readFileSync(process.env.DTC_S1_5_SIGNATURE_FIXTURE):bytes;await freshWorkspace('s1-5-post-save-signature',signatureBytes);await run('resetRingProgress()');run('TC.guard.remaining=100');
+  const ids=run('activeCabinets().slice(0,5).map(c=>c.id)');assert(ids.length>=5,'Fixture needs five active cabinets for the post-save flow cases');
+  async function prepareNew(id){await run(`openCab(${JSON.stringify(id)})`);el('inspector').value='S1.5 post-save tester';run('setAllScores(4)');advance(61);}
+  function latestCapture(){const value=env.signatureStartCalls.at(-1);assert(value,'native signature capture was not requested');return value;}
+  function deliverSaved(recordId){const raw=JSON.stringify({targetType:'Kontroll',recordId,status:'DRAFT'});run(`onNativeSignatureDraftSaved(${JSON.stringify(raw)})`);}
+  function cancelCapture(){run("onNativeSignatureCaptureCancelled('TAGASI')");}
+
+  // 1–2: ordinary SALVESTA requests capture only after the persisted permanent ID is available.
+  await prepareNew(ids[0]);await run('saveInspection()');
+  const firstId=run(`TC.cycle.entries[${JSON.stringify(ids[0])}].kontrollId`),firstSaved=run(`TC.records.some(r=>r.id===${JSON.stringify(ids[0])}&&r.syncId===${JSON.stringify(firstId)})`);
+  assert(firstSaved,'Kontroll must be durable before signature capture');assert.equal(latestCapture().recordId,firstId);assert.equal(latestCapture().kilpId,ids[0]);
+  assert.equal(run('pendingPostSaveSignatureNavigation.goNext'),false);assert(!el('inspectTab').classList.contains('hidden'),'ordinary save waits on signature while inspection remains open');
+  // 4: KINNITA callback refreshes local drafts and then performs ordinary navigation.
+  deliverSaved(firstId);assert(el('inspectTab').classList.contains('hidden'));assert(!el('cabTab').classList.contains('hidden'));assert.equal(run('pendingPostSaveSignatureNavigation'),null);
+
+  // 3–4: SALVESTA + JÄRGMINE must stay on this cabinet until the signature result arrives.
+  await prepareNew(ids[1]);await run('saveInspection(true)');const nextId=run(`TC.cycle.entries[${JSON.stringify(ids[1])}].kontrollId`);
+  assert.equal(latestCapture().recordId,nextId);assert.equal(run('S.selected.id'),ids[1]);assert.equal(run('TC.opened'),null);assert.equal(run('pendingPostSaveSignatureNavigation.goNext'),true);
+  deliverSaved(nextId);assert.equal(run('S.selected.id'),ids[2]);assert.equal(run('TC.opened.id'),ids[2]);
+
+  // 5: TAGASI does not remove the saved record or create a draft and still navigates.
+  await prepareNew(ids[3]);await run('saveInspection()');const cancelId=run(`TC.cycle.entries[${JSON.stringify(ids[3])}].kontrollId`);latestCapture();
+  assert(run(`TC.records.some(r=>r.id===${JSON.stringify(ids[3])}&&r.syncId===${JSON.stringify(cancelId)})`));cancelCapture();
+  assert.equal(run('pendingPostSaveSignatureNavigation'),null);assert.equal(run('JSON.parse(Android.listSignatureDrafts()).data.length'),0);assert(el('inspectTab').classList.contains('hidden'));
+  assert(el('toast').textContent.includes('Kontroll salvestatud. Allkirja mustand jäi lisamata.'));
+
+  // 6: a bridge start failure leaves the committed Kontroll intact and finishes navigation.
+  await prepareNew(ids[4]);const originalStart=env.cx.Android.startSignatureCapture;env.cx.Android.startSignatureCapture=payload=>{env.signatureStartCalls.push(JSON.parse(payload));return false;};
+  await run('saveInspection()');env.cx.Android.startSignatureCapture=originalStart;const failedStartId=run(`TC.cycle.entries[${JSON.stringify(ids[4])}].kontrollId`);
+  assert.equal(latestCapture().recordId,failedStartId);assert(run(`TC.records.some(r=>r.id===${JSON.stringify(ids[4])}&&r.syncId===${JSON.stringify(failedStartId)})`));
+  assert.equal(run('pendingPostSaveSignatureNavigation'),null);assert(el('inspectTab').classList.contains('hidden'));assert(el('toast').textContent.includes('Allkirja mustand jäi lisamata.'));
+
+  // 7: editing keeps the existing KontrollID and automatically requests a new local draft.
+  const beforeEditCount=run('TC.records.length');await openCabWithChoices(ids[0],'list',['edit']);run('setAllScores(3)');await run('saveInspection()');
+  assert.equal(latestCapture().recordId,firstId);assert.equal(run(`TC.records.filter(r=>r.syncId===${JSON.stringify(firstId)}).length`),1);assert.equal(run('TC.records.length'),beforeEditCount);
+  cancelCapture();
+
+  // 8: deliberate UUS KONTROLL gets its newly-created permanent ID, not the prior ID.
+  const checkedBefore=run('S.sessionChecked.size'),rowsBefore=run('TC.records.length');await openCabWithChoices(ids[0],'list',['new','create']);
+  el('inspector').value='S1.5 duplicate tester';run('setAllScores(5)');advance(61);await run('saveInspection()');
+  const duplicateId=run(`TC.cycle.entries[${JSON.stringify(ids[0])}].kontrollId`);assert(duplicateId&&duplicateId!==firstId);assert.equal(latestCapture().recordId,duplicateId);
+  assert.equal(run('TC.records.length'),rowsBefore+1);assert.equal(run('S.sessionChecked.size'),checkedBefore);cancelCapture();
+
+  // 9: the existing manual VAATA KONTROLLI → ALLKIRJA MUSTAND path remains usable.
+  const latest=JSON.parse(JSON.stringify(run(`savedEntry(${JSON.stringify(ids[0])})`))),manual=run(`viewSavedInspection(${JSON.stringify(ids[0])},${JSON.stringify(latest)},TC.cycle.entries[${JSON.stringify(ids[0])}])`);
+  assert.equal(el('appDialogTitle').textContent,'VAATA KONTROLLI');run("appDialogChoice('signature')");await manual;
+  assert.equal(latestCapture().recordId,duplicateId);assert.equal(run('pendingPostSaveSignatureNavigation'),null);deliverSaved(duplicateId);assert(el('cabTab').classList.contains('hidden')===false);
  }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
 await test('S1.5 Kontroll recordVersion survives restart and XLSX roundtrip, uses ID after row move, and advances on signed-field edit',async()=>{

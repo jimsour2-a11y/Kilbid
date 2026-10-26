@@ -209,6 +209,7 @@ public class MainActivity extends Activity {
                         }
                         @Override public void onCaptureCancelled(String reason) {
                             if (reason != null && reason.contains("suurus muutus")) Toast.makeText(MainActivity.this, reason, Toast.LENGTH_LONG).show();
+                            sendSignatureCaptureCancelled(reason);
                             signatureCaptureDialog = null;
                         }
                     });
@@ -264,6 +265,12 @@ public class MainActivity extends Activity {
         if (webView == null) return;
         String quoted = JSONObject.quote(json == null ? "{}" : json);
         runOnUiThread(() -> webView.evaluateJavascript("window.onNativeSignatureDraftSaved&&window.onNativeSignatureDraftSaved(" + quoted + ")", null));
+    }
+
+    private void sendSignatureCaptureCancelled(String reason) {
+        if (webView == null) return;
+        String quoted = JSONObject.quote(reason == null ? "" : reason);
+        runOnUiThread(() -> webView.evaluateJavascript("window.onNativeSignatureCaptureCancelled&&window.onNativeSignatureCaptureCancelled(" + quoted + ")", null));
     }
 
     private void sendSignatureCaptureError(String message) {

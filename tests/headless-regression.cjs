@@ -1073,6 +1073,14 @@ async function s2MakeDraft(record,options={}){
 }
 async function s2RegisterDraft(draft){env.signatureDraftPayloads.set(draft.signatureId,draft);return draft;}
 function s2FreshPersistentRecord(){const value=run('TC.records.find(r=>r.persistentId&&r.syncId)');if(!value)throw Error('R4 workbook needs a persistent Kontroll record');return JSON.parse(JSON.stringify(value));}
+await test('S2 signature inlineStr reader handles qualified and ordinary SpreadsheetML text after serializer round-trip',async()=>{
+ const xml='<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><x:r><x:t>first</x:t></x:r><x:r><x:t>second</x:t></x:r></is></c><c r="B1" t="inlineStr"><is><t>plain</t></is></c></row></sheetData></worksheet>';
+ env.cx.inlineStringXml=xml;
+ const result=await run("(()=>{const initial=parseXml(inlineStringXml),reparsed=parseXml(xmlStr(initial)),cells=qsa(reparsed,'c'),qualified=cells[0],plain=cells[1];return {oldQualified:Array.from(qualified.getElementsByTagName('t')).map(x=>x.textContent).join(''),qualifiedTexts:qsa(qualified,'t').map(x=>x.textContent).join(''),qualifiedInline:getInline(qualified),plainInline:getInline(plain),qualifiedTextNodes:qsa(qualified,'t').length};})()");
+ assert.equal(result.oldQualified,'','the old qualified-name lookup must demonstrate why it misses prefixed SpreadsheetML t nodes');
+ assert.equal(result.qualifiedTexts,'firstsecond');assert.equal(result.qualifiedInline,'firstsecond');
+ assert.equal(result.plainInline,'plain','ordinary unprefixed inlineStr remains readable');assert.equal(result.qualifiedTextNodes,2,'rich text runs remain joined in document order');
+});
 await test('S2 signature accepts an existing v1 draft and records its original renderer profile',async()=>{
  const previous={env,storeDir,clock:{...clock}};try{
   await freshWorkspace('s2-renderer-v1-compatibility',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record,{rendererProfile:S2_TEST_RENDERER_V1}));
@@ -1114,7 +1122,7 @@ await test('S2 signature reports append/serialization/reparse counts and rolls b
   const message=error.split('\n').at(-1);assert(message.includes(`DOM ${draft.pointCount}`));assert(message.includes(`serialiseeritud AllkiriID esinemised ${draft.pointCount}`));assert(message.includes(`uuesti loetud AllkiriID read ${draft.pointCount-1}`));assert.match(message,/esimene puuduv PunktNr \d+/);assert.match(message,/viimane korrektne PunktNr \d+/);assert.match(message,/kasutatud read \d+-\d+/);assert.match(message,/dimension /);
  }finally{run("if(typeof __s2DiagnosticOriginalVerifier!=='undefined')s2VerifyProductionCandidate=__s2DiagnosticOriginalVerifier");env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
 });
-for(const scenario of [{label:'224 points in 2 strokes',total:224,strokes:2},{label:'317 points in 1 stroke',total:317,strokes:1},{label:'360 points across multiple strokes',total:360,strokes:4},{label:'640 points across multiple strokes',total:640,strokes:5}]){
+for(const scenario of [{label:'243 points in 1 stroke',total:243,strokes:1},{label:'224 points in 2 strokes',total:224,strokes:2},{label:'317 points in 1 stroke',total:317,strokes:1},{label:'360 points across multiple strokes',total:360,strokes:4},{label:'640 points across multiple strokes',total:640,strokes:5}]){
  await test(`S2 signature stroke production ZIP round-trip preserves every raw value: ${scenario.label}`,async()=>{
   const previous={env,storeDir,clock:{...clock}};try{
    await freshWorkspace(`s2-stroke-roundtrip-${scenario.total}`,s2TestWorkbook());await run('continueCycle()');

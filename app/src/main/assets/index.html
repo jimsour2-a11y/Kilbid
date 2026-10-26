@@ -414,7 +414,7 @@ function cellMap(doc){
  return m;
 }
 function getV(c){let v=c?qsa(c,"v")[0]:null;return v?v.textContent:""}
-function getInline(c){return c?Array.from(c.getElementsByTagName("t")).map(x=>x.textContent).join(""):""}
+function getInline(c){return c?qsa(c,"t").map(x=>x.textContent).join(""):""}
 function cellValue(c){
  if(!c)return "";
  const t=c.getAttribute("t");

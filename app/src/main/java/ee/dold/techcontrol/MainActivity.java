@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.os.SystemClock;
 import android.provider.DocumentsContract;
@@ -203,7 +204,7 @@ public class MainActivity extends Activity {
                         @Override public void onDraftSaved(SignatureCaptureCore.Draft draft) {
                             JSONObject summary = signatureDraftSummary(draft);
                             Toast.makeText(MainActivity.this,
-                                    "Allkirja mustand salvestati telefoni. XLSX jäi muutmata.", Toast.LENGTH_LONG).show();
+                                    "Allkirja andmed salvestati telefoni.", Toast.LENGTH_LONG).show();
                             sendSignatureCaptureSaved(summary.toString());
                             signatureCaptureDialog = null;
                         }
@@ -226,6 +227,7 @@ public class MainActivity extends Activity {
             out.put("schemaVersion", draft.schemaVersion);
             out.put("status", draft.status);
             out.put("signatureId", draft.signatureId);
+            out.put("nonce", draft.nonce);
             out.put("targetType", draft.targetType);
             out.put("recordId", draft.recordId);
             out.put("recordVersion", draft.recordVersion == null ? JSONObject.NULL : draft.recordVersion);
@@ -259,6 +261,38 @@ public class MainActivity extends Activity {
                     .put("geometryHash", draft.geometryHash));
         } catch (Exception ignored) { }
         return out;
+    }
+
+    private JSONObject signatureDraftPayload(SignatureCaptureCore.Draft draft) throws Exception {
+        JSONObject out = signatureDraftSummary(draft);
+        JSONObject metadata = new JSONObject();
+        for (Map.Entry<String, String> entry : draft.targetMetadata.entrySet()) metadata.put(entry.getKey(), entry.getValue());
+        out.put("targetMetadata", metadata);
+        org.json.JSONArray points = new org.json.JSONArray();
+        for (SignatureCaptureCore.Point point : draft.points) {
+            org.json.JSONArray tuple = new org.json.JSONArray();
+            tuple.put(point.strokeNr).put(point.pointNr).put(point.xNorm).put(point.yNorm).put(point.elapsedMs);
+            points.put(tuple);
+        }
+        out.put("points", points);
+        out.put("pngBase64", Base64.encodeToString(draft.pngBytes, Base64.NO_WRAP));
+        return out;
+    }
+
+    private void validateProductionDraftPng(SignatureCaptureCore.Draft draft) throws Exception {
+        if (!SignaturePngRenderer.PROFILE.equals(draft.rendererProfile))
+            throw new IllegalStateException("Selle allkirja renderdusprofiil ei sobi tootmiskinnituseks.");
+        Bitmap bitmap = BitmapFactory.decodeByteArray(draft.pngBytes, 0, draft.pngBytes.length);
+        if (bitmap == null) throw new IllegalStateException("Allkirja PNG-faili ei saa dekodeerida.");
+        try {
+            if (bitmap.getWidth() != 900 || bitmap.getHeight() != 300)
+                throw new IllegalStateException("Allkirja PNG mõõtmed ei vasta kinnitatud profiilile.");
+            int[] pixels = new int[bitmap.getWidth() * bitmap.getHeight()];
+            bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
+            boolean ink = false;
+            for (int pixel : pixels) if (Color.alpha(pixel) > 0) { ink = true; break; }
+            if (!ink) throw new IllegalStateException("Allkirja PNG on tühi.");
+        } finally { bitmap.recycle(); }
     }
 
     private void sendSignatureCaptureSaved(String json) {
@@ -689,6 +723,14 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String listSignatureDrafts(){
             try{org.json.JSONArray result=new org.json.JSONArray();for(SignatureCaptureCore.Draft draft:signatureDraftStore.listDrafts())result.put(signatureDraftSummary(draft));return WorkspaceStore.ok(result);}
             catch(Exception e){return WorkspaceStore.error(e);}
+        }
+        @JavascriptInterface public String readSignatureDraft(String signatureId){
+            try{
+                if(signatureId==null||signatureId.length()>64)throw new IllegalArgumentException("AllkiriID on vigane");
+                SignatureCaptureCore.Draft draft=signatureDraftStore.readDraftById(signatureId);
+                validateProductionDraftPng(draft);
+                return WorkspaceStore.ok(signatureDraftPayload(draft));
+            }catch(Exception e){return WorkspaceStore.error(e);}
         }
         @JavascriptInterface public String startLanSyncSession(String dbId,String responseBase64){
             try {

@@ -227,6 +227,9 @@ public final class SignatureCaptureS1Test {
                 List<SignatureCaptureCore.Draft> restored = new SignatureDraftStore(dir.toFile()).listDrafts();
                 check(restored.size() == 1, "draft not restored after store reconstruction");
                 SignatureCaptureCore.Draft d = restored.get(0);
+                SignatureCaptureCore.Draft fetched = new SignatureDraftStore(dir.toFile()).readDraftById(source.signatureId);
+                check(fetched.signatureId.equals(source.signatureId) && Arrays.equals(fetched.pngBytes, source.pngBytes), "full draft lookup lost the durable PNG");
+                expect(java.io.IOException.class, () -> new SignatureDraftStore(dir.toFile()).readDraftById("dtc-sign-00000000-0000-4000-8000-000000000001"));
                 check(d.signatureId.equals(source.signatureId) && d.nonce.equals(source.nonce), "identity metadata lost");
                 check(d.points.size() == source.points.size() && SignatureCanonicalJson.stringify(d.strokesObject()).equals(SignatureCanonicalJson.stringify(source.strokesObject())), "raw strokes changed after restart");
                 check(d.targetType.equals("Kontroll") && d.recordId.equals("dtc-kontroll-existing") && d.kilpId.equals("EK-027"), "target link changed");

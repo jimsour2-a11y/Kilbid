@@ -92,7 +92,7 @@ final class SignatureCaptureDialog {
         TextView versionText = text(version, 12, false, target.recordVersion == null ? Color.rgb(150, 88, 0) : Color.rgb(90, 102, 113));
         versionText.setPadding(0, dp(3), 0, dp(2));
         header.addView(versionText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView instructions = text("Kirjuta allkiri sõrmega. Kinnita salvestab mustandi ainult sellesse telefoni; XLSX-i allkirja ei lisata.", 12, false, Color.rgb(90, 102, 113));
+        TextView instructions = text("Kirjuta allkiri sõrmega. Kinnita salvestab esmalt telefoni mustandi; DOLD kontrollib selle ja proovib lisada aktiivsesse tööfaili.", 12, false, Color.rgb(90, 102, 113));
         instructions.setPadding(0, 0, 0, dp(6));
         header.addView(instructions, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         ScrollView headerScroll = new ScrollView(activity);

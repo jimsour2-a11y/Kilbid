@@ -79,6 +79,16 @@ final class SignatureDraftStore {
         return Collections.unmodifiableList(registry.drafts);
     }
 
+    synchronized SignatureCaptureCore.Draft readDraftById(String signatureId) throws IOException {
+        File file = draftFile(signatureId, false);
+        if (!file.isFile()) throw new IOException("Allkirja telefoni mustandit ei leitud");
+        Registry registry = readRegistry();
+        if (!registry.complete) throw new IOException("Allkirjade kohalik register ei ole täielik");
+        for (SignatureCaptureCore.Draft draft : registry.drafts)
+            if (draft.signatureId.equals(signatureId)) return draft;
+        throw new IOException("Allkirja telefoni mustandit ei leitud");
+    }
+
     private Registry readRegistry() throws IOException {
         if (!directory.exists()) return new Registry(true, Collections.emptyList(), SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(Collections.emptyList())));
         File[] files = directory.listFiles((dir, name) -> name.endsWith(".draft"));

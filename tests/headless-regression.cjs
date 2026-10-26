@@ -71,7 +71,7 @@ function resetLanStub(){lanStub.hostStartJson='{"ok":false,"status":"NO_LOCAL_NE
 class ClockDate extends Date{constructor(...args){super(...(args.length?args:[Date.now()+clock.offset]));}static now(){return Date.now()+clock.offset;}}
 function makeContext(){
  const elements=new Map();
- const signatureStartCalls=[];
+ const signatureStartCalls=[];const signatureDraftPayloads=new Map();
  const sharedFiles=[];let pendingShare=null;
  class El{constructor(id){this.id=id;this.value='';this.textContent='';this.disabled=false;this.style={};this.dataset={};this.children=[];this.classes=new Set();this.classList={add:(...v)=>v.forEach(x=>this.classes.add(x)),remove:(...v)=>v.forEach(x=>this.classes.delete(x)),toggle:(v,on)=>on?this.classes.add(v):this.classes.delete(v),contains:v=>this.classes.has(v)};}
   set innerHTML(s){this._html=s;for(const c of this.children)elements.delete(c);this.children=[];parseUi(s,this);if(this.tag==='select'){const options=[...s.matchAll(/<option([^>]*)>([^<]*)/g)];const o=options.find(m=>/\bselected\b/.test(m[1]))||options[0];if(o){const m=o[1].match(/value="([^"]*)"/);this.value=m?m[1]:o[2];}}}
@@ -80,10 +80,10 @@ function makeContext(){
  function parseUi(s,owner){for(const m of s.matchAll(/<(input|select|textarea|div|span|button|section|nav|datalist)[^>]*\bid="([^"]+)"[^>]*>/g)){const el=new El(m[2]);el.tag=m[1];const val=m[0].match(/\bvalue="([^"]*)"/);if(val)el.value=val[1];if(m[1]==='select'){const fragment=s.slice(m.index+m[0].length).split('</select>')[0];const opt=fragment.match(/<option[^>]*selected[^>]*>[^<]*/)||fragment.match(/<option[^>]*>[^<]*/);if(opt){const v=opt[0].match(/value="([^"]*)"/);el.value=v?v[1]:opt[0].split('>')[1];}}if(m[0].includes('hidden'))el.classes.add('hidden');elements.set(el.id,el);if(owner)owner.children.push(el.id);}}
  parseUi(html.replace(/<script[^>]*>[\s\S]*?<\/script>/g,''));const buttons=[new El('save'),new El('next')];
  const document={getElementById:id=>elements.get(id)||null,querySelectorAll:q=>q==='#inspectTab .stickySave button'?buttons:[],body:new El('body'),documentElement:new El('root'),activeElement:null,addEventListener(){},createElement:n=>new El(n)};
- const workspaceDir=storeDir;const bridge={saveWorkspace(id,payload){if(injectFailure)return JSON.stringify({ok:false,error:'Injected disk full'});const target=path.join(workspaceDir,id+'.json'),tmp=target+'.new',fd=fs.openSync(tmp,'w');fs.writeFileSync(fd,payload);fs.fsyncSync(fd);fs.closeSync(fd);fs.renameSync(tmp,target);return JSON.stringify({ok:true,data:true});},readWorkspace(id){return JSON.stringify({ok:true,data:fs.existsSync(path.join(workspaceDir,id+'.json'))?JSON.parse(fs.readFileSync(path.join(workspaceDir,id+'.json'))):null});},listWorkspaces(){return JSON.stringify({ok:true,data:fs.readdirSync(workspaceDir).filter(n=>n.endsWith('.json')).map(n=>{const o=JSON.parse(fs.readFileSync(path.join(storeDir,n)));delete o.workbookBase64;delete o.baseWorkbookBase64;return o;})});},hashBytes(b){return crypto.createHash('sha256').update(Buffer.from(b,'base64')).digest('hex');},beginShareFile(name,mime){pendingShare={name,mime,chunks:[]};return true;},writeShareChunk(b){if(!pendingShare)return false;pendingShare.chunks.push(Buffer.from(b,'base64'));return true;},finishShareFile(){if(!pendingShare)return false;sharedFiles.push({...pendingShare,bytes:Buffer.concat(pendingShare.chunks)});pendingShare=null;return true;},elapsedRealtime(){return clock.mono;},consumeQrProof(id){const ok=proof.id===id;proof.id=null;return ok;},scanQr(){lanStub.scanCount++;},startSignatureCapture(payload){signatureStartCalls.push(JSON.parse(payload));return true;},listSignatureDrafts(){return JSON.stringify({ok:true,data:[]});},startLanSyncSession(dbId,responseBase64){lanStub.hostStartCalls.push({dbId,responseBase64});return lanStub.hostStartJson;},stopLanSyncSession(){lanStub.stopCount++;return true;},getLanSyncSessionStatus(){return JSON.stringify(lanStub.hostStatus);},startLanSyncClient(pairingJson,expectedDbId,requestBase64){lanStub.clientStartCalls.push({pairing:JSON.parse(pairingJson),expectedDbId,requestBase64});return lanStub.clientStartJson;},getLanSyncClientResult(){return lanStub.clientResultJson;},createLanSyncQrPngBase64(payload,size){lanStub.qrPayloads.push({payload,size});return lanStub.qrPngBase64;},setTheme(){}};
+ const workspaceDir=storeDir;const bridge={saveWorkspace(id,payload){if(injectFailure)return JSON.stringify({ok:false,error:'Injected disk full'});const target=path.join(workspaceDir,id+'.json'),tmp=target+'.new',fd=fs.openSync(tmp,'w');fs.writeFileSync(fd,payload);fs.fsyncSync(fd);fs.closeSync(fd);fs.renameSync(tmp,target);return JSON.stringify({ok:true,data:true});},readWorkspace(id){return JSON.stringify({ok:true,data:fs.existsSync(path.join(workspaceDir,id+'.json'))?JSON.parse(fs.readFileSync(path.join(workspaceDir,id+'.json'))):null});},listWorkspaces(){return JSON.stringify({ok:true,data:fs.readdirSync(workspaceDir).filter(n=>n.endsWith('.json')).map(n=>{const o=JSON.parse(fs.readFileSync(path.join(storeDir,n)));delete o.workbookBase64;delete o.baseWorkbookBase64;return o;})});},hashBytes(b){return crypto.createHash('sha256').update(Buffer.from(b,'base64')).digest('hex');},beginShareFile(name,mime){pendingShare={name,mime,chunks:[]};return true;},writeShareChunk(b){if(!pendingShare)return false;pendingShare.chunks.push(Buffer.from(b,'base64'));return true;},finishShareFile(){if(!pendingShare)return false;sharedFiles.push({...pendingShare,bytes:Buffer.concat(pendingShare.chunks)});pendingShare=null;return true;},elapsedRealtime(){return clock.mono;},consumeQrProof(id){const ok=proof.id===id;proof.id=null;return ok;},scanQr(){lanStub.scanCount++;},startSignatureCapture(payload){signatureStartCalls.push(JSON.parse(payload));return true;},listSignatureDrafts(){const data=[...signatureDraftPayloads.values()].map(({targetMetadata,points,pngBase64,...summary})=>summary);return JSON.stringify({ok:true,data});},readSignatureDraft(id){const data=signatureDraftPayloads.get(id);return JSON.stringify(data?{ok:true,data}:{ok:false,error:'Test draft missing'});},startLanSyncSession(dbId,responseBase64){lanStub.hostStartCalls.push({dbId,responseBase64});return lanStub.hostStartJson;},stopLanSyncSession(){lanStub.stopCount++;return true;},getLanSyncSessionStatus(){return JSON.stringify(lanStub.hostStatus);},startLanSyncClient(pairingJson,expectedDbId,requestBase64){lanStub.clientStartCalls.push({pairing:JSON.parse(pairingJson),expectedDbId,requestBase64});return lanStub.clientStartJson;},getLanSyncClientResult(){return lanStub.clientResultJson;},createLanSyncQrPngBase64(payload,size){lanStub.qrPayloads.push({payload,size});return lanStub.qrPngBase64;},setTheme(){}};
  const cx={console,document,Android:bridge,DOMParser:Parser,XMLSerializer:Serializer,JSZip,Uint8Array,Uint32Array,TextEncoder,TextDecoder,Date:ClockDate,crypto:crypto.webcrypto,performance:{now:()=>clock.mono},setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},localStorage:{getItem:k=>settings.get(k)??null,setItem:(k,v)=>settings.set(k,String(v)),removeItem:k=>settings.delete(k)},matchMedia:()=>({matches:false,addEventListener(){}}),alert:m=>alerts.push(String(m)),confirm:()=>true,btoa:b=>Buffer.from(b,'binary').toString('base64'),atob:b=>Buffer.from(b,'base64').toString('binary'),location:{protocol:'file:'},Blob,URL};
  cx.window=cx;cx.window.scrollTo=()=>{};cx.window.addEventListener=()=>{};vm.createContext(cx);vm.runInContext(app,cx,{filename:'index-controller.js'});vm.runInContext(controller,cx,{filename:'v053-controller.js'});
- return {cx,run:s=>vm.runInContext(s,cx),el:id=>elements.get(id),buttons,sharedFiles,signatureStartCalls};
+ return {cx,run:s=>vm.runInContext(s,cx),el:id=>elements.get(id),buttons,sharedFiles,signatureStartCalls,signatureDraftPayloads,setInjectFailure:value=>{injectFailure=!!value;}};
 }
 let env=makeContext();const run=s=>env.run(s);const el=id=>env.el(id);
 async function importBytes(bytes,name='test.xlsx',choice='internal',inspectDialog=null){
@@ -115,13 +115,17 @@ async function openCabWithChoices(id,source='list',choices=['edit'],inspectDialo
  }
  if(!settled)throw Error('Cabinet open dialog did not finish within 10 seconds');await pending;
 }
+async function waitForAppDialog(title){
+ for(let i=0;i<400;i++){if(el('appDialogTitle')?.textContent===title)return;await new Promise(resolve=>setTimeout(resolve,25));}
+ throw Error(`App dialog did not open: ${title}`);
+}
 function advance(s){clock.mono+=s*1000;clock.offset+=s*1000;}
 async function count(sheet){return run(`(async()=>{const d=await loadDoc(${JSON.stringify(sheet)});return qsa(d,'row').filter(r=>Number(r.getAttribute('r'))>=5&&getCellVal(d,'B',Number(r.getAttribute('r')))).length;})()`);}
 async function freshWorkspace(label,bytes){const dir=path.join(out,label);fs.rmSync(dir,{recursive:true,force:true});fs.mkdirSync(dir,{recursive:true});storeDir=dir;env=makeContext();await run('TC.startupTask');await importBytes(bytes,label+'.xlsx');return dir;}
 async function saveTestInspection(id,desc=''){await run('openCab('+JSON.stringify(id)+')');el('inspector').value='Stage 12 tester';run('setAllScores(4)');if(desc)run(`S.stagedDefects=[{point:'Stage 12',desc:${JSON.stringify(desc)},grade:'C',repeat:'Ei',owner:'Stage 12 tester',due:plusDays(today(),30)}]`);advance(61);await run('saveInspection()');if(run('pendingPostSaveSignatureNavigation'))run("onNativeSignatureCaptureCancelled('test helper cancel')");env.signatureStartCalls.length=0;}
 function assertR4VisibleScore(value,label){assert.equal(run(`scoreLabel(${JSON.stringify(value)})`),label);run('renderRatings()');const mark=value===''?'–':String(value);assert(el('scoreLegend').innerHTML.includes(`<b>${mark}</b><span>${label}</span>`));assert.equal(el('scoreHint').textContent,'– = Ei rakendu, 0 = Ei ole / puudub.');}
 async function r3Prepare(label,workbookBytes,n=4,firstDefect=false){await freshWorkspace(label,workbookBytes);run('TC.guard.remaining=100');await run('resetRingProgress()');const ids=run(`activeCabinets().slice(0,${n}).map(c=>c.id)`);for(let i=0;i<ids.length;i++)await saveTestInspection(ids[i],firstDefect&&i===0?'R3 linked defect':'');return {ids,cycle:JSON.parse(JSON.stringify(run('TC.cycle'))),snapshot:JSON.parse(JSON.stringify(await run('storeCall("get",TC.dbId)'))),controls:await count('Kontrollid'),defects:await count('Puudused')};}
-const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),legacyR3=testFilter.includes('r3 legacy'),r3CycleCase=/^r3 (stale cycle|fuller incoming cycle|identical cycle entries|missing incoming cycle metadata|row movement and rounded excel w|additional kontrollids|legacy cycle adopts)/i.test(name),r3BootstrapCase=/^r3 (pairing|qr |parser|host |empty startup|scan button|malformed scanned qr|non-direct|direct client|direct baseline|imported baseline|corrupt remote|wrong lineage|user can cancel|phone with|direct initialization|dold flow)/i.test(name),r5XlsxCase=name.startsWith('R5 XLSX preservation'),focusedSetup=(testFilter.includes('r1 package')||testFilter.includes('r1 persistent id')||testFilter.startsWith('r2')||(testFilter.includes('r3')&&!legacyR3)||testFilter.includes('r4 scoring')||testFilter.includes('r5 xlsx preservation')||testFilter.includes('s1 signature'))&&name.startsWith('A import'),groupSelection=(testFilter==='r3 cycle'&&r3CycleCase)||(testFilter==='r3 qr bootstrap'&&r3BootstrapCase);if(r3CycleCase&&!testFilter&&process.env.DTC_RUN_R3!=='1')return;if(r5XlsxCase&&!testFilter.includes('r5 xlsx preservation'))return;if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!focusedSetup&&!groupSelection&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!focusedSetup)results.push({name,status:'PASS'});console.log(focusedSetup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
+const testFilter=(process.env.DTC_TEST_FILTER||'').toLowerCase(),testExcludes=(process.env.DTC_TEST_EXCLUDE||'').toLowerCase().split('|').map(s=>s.trim()).filter(Boolean),results=[];async function test(name,fn){const low=name.toLowerCase(),legacyR3=testFilter.includes('r3 legacy'),r3CycleCase=/^r3 (stale cycle|fuller incoming cycle|identical cycle entries|missing incoming cycle metadata|row movement and rounded excel w|additional kontrollids|legacy cycle adopts)/i.test(name),r3BootstrapCase=/^r3 (pairing|qr |parser|host |empty startup|scan button|malformed scanned qr|non-direct|direct client|direct baseline|imported baseline|corrupt remote|wrong lineage|user can cancel|phone with|direct initialization|dold flow)/i.test(name),r5XlsxCase=name.startsWith('R5 XLSX preservation'),s2SignatureCase=name.startsWith('S2 signature'),focusedSetup=(testFilter.includes('r1 package')||testFilter.includes('r1 persistent id')||testFilter.startsWith('r2')||(testFilter.includes('r3')&&!legacyR3)||testFilter.includes('r4 scoring')||testFilter.includes('r5 xlsx preservation')||testFilter.includes('s1 signature')||testFilter.includes('s2 signature'))&&name.startsWith('A import'),groupSelection=(testFilter==='r3 cycle'&&r3CycleCase)||(testFilter==='r3 qr bootstrap'&&r3BootstrapCase);if(r3CycleCase&&!testFilter&&process.env.DTC_RUN_R3!=='1')return;if(r5XlsxCase&&!testFilter.includes('r5 xlsx preservation'))return;if(s2SignatureCase&&process.env.DTC_RUN_S2_SIGNATURE!=='1')return;if(testExcludes.some(term=>low.includes(term)))return;if(testFilter&&!low.includes(testFilter)&&!focusedSetup&&!groupSelection&&!(testFilter.startsWith('17 cycle start')&&name.startsWith('A import')))return;try{await fn();if(!focusedSetup)results.push({name,status:'PASS'});console.log(focusedSetup?'SETUP':'PASS',name);}catch(e){results.push({name,status:'FAIL',error:e.stack});console.error('FAIL',name,e);console.error('STATE',run("({busy:TC.busy,ready:TC.ready,cycle:TC.cycle,selected:S.selected?.id,status:$('cabStatus')?.value,seconds:inspectionSeconds(),guard:TC.guard,inspector:$('inspector')?.value,toast:$('toast')?.textContent})"));console.error('ALERTS',alerts);throw e;}}
 (async()=>{
 const bytes=fs.readFileSync(fixture);const original=await JSZip.loadAsync(bytes);const originalSheetNames=await workbookSheetNames(original);let initialRows,initialDefects,id,other,firstRow,firstStart,cycleId;
 await test('A import current workbook, dynamic active count, reserve IDs hidden',async()=>{
@@ -928,7 +932,7 @@ await test('S1 signature capture launches from a saved Kontroll and freezes its 
   const record=JSON.parse(JSON.stringify(run('TC.records.find(r=>r.persistentId&&r.syncId)')));assert(record?.syncId,'Fixture needs a persistent KontrollID');
   run(`S.selected=S.cabinets.find(c=>c.id===${JSON.stringify(record.id)})`);
   const exact=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);assert(Number.isInteger(exact.recordVersion)&&exact.recordVersion>=1);assert.equal(exact.recordVersionSource,'KONTROLL_SNAPSHOT_METADATA_V1');assert.match(exact.recordVersionSnapshotHash,/^[a-f0-9]{64}$/);
-  const savedRevision=run('TC.revision'),savedRows=run('TC.records.length');const dialog=run(`viewSavedInspection(${JSON.stringify(record.id)},${JSON.stringify(record)},{})`);
+  const savedRevision=run('TC.revision'),savedRows=run('TC.records.length');const dialog=run(`viewSavedInspection(${JSON.stringify(record.id)},${JSON.stringify(record)},{})`);await waitForAppDialog('VAATA KONTROLLI');
   assert.equal(el('appDialogTitle').textContent,'VAATA KONTROLLI');assert(el('appDialogActions').innerHTML.includes('ALLKIRJA MUSTAND'));
   run("appDialogChoice('signature')");await dialog;const payload=env.signatureStartCalls.pop();assert(payload,'native capture bridge was not called');
   assert.equal(payload.targetType,'Kontroll');assert.equal(payload.recordId,record.syncId);assert.equal(payload.kilpId,record.id);assert.equal(payload.signerName,record.inspector);
@@ -942,7 +946,7 @@ await test('S1.5 post-save signature flow targets saved KontrollID and defers na
   const ids=run('activeCabinets().slice(0,5).map(c=>c.id)');assert(ids.length>=5,'Fixture needs five active cabinets for the post-save flow cases');
   async function prepareNew(id){await run(`openCab(${JSON.stringify(id)})`);el('inspector').value='S1.5 post-save tester';run('setAllScores(4)');advance(61);}
   function latestCapture(){const value=env.signatureStartCalls.at(-1);assert(value,'native signature capture was not requested');return value;}
-  function deliverSaved(recordId){const raw=JSON.stringify({targetType:'Kontroll',recordId,status:'DRAFT'});run(`onNativeSignatureDraftSaved(${JSON.stringify(raw)})`);}
+  async function deliverSaved(recordId){const raw=JSON.stringify({targetType:'Kontroll',recordId,status:'DRAFT'});await run(`onNativeSignatureDraftSaved(${JSON.stringify(raw)})`);}
   function cancelCapture(){run("onNativeSignatureCaptureCancelled('TAGASI')");}
 
   // 1–2: ordinary SALVESTA requests capture only after the persisted permanent ID is available.
@@ -951,12 +955,12 @@ await test('S1.5 post-save signature flow targets saved KontrollID and defers na
   assert(firstSaved,'Kontroll must be durable before signature capture');assert.equal(latestCapture().recordId,firstId);assert.equal(latestCapture().kilpId,ids[0]);
   assert.equal(run('pendingPostSaveSignatureNavigation.goNext'),false);assert(!el('inspectTab').classList.contains('hidden'),'ordinary save waits on signature while inspection remains open');
   // 4: KINNITA callback refreshes local drafts and then performs ordinary navigation.
-  deliverSaved(firstId);assert(el('inspectTab').classList.contains('hidden'));assert(!el('cabTab').classList.contains('hidden'));assert.equal(run('pendingPostSaveSignatureNavigation'),null);
+  await deliverSaved(firstId);assert(el('inspectTab').classList.contains('hidden'));assert(!el('cabTab').classList.contains('hidden'));assert.equal(run('pendingPostSaveSignatureNavigation'),null);
 
   // 3–4: SALVESTA + JÄRGMINE must stay on this cabinet until the signature result arrives.
   await prepareNew(ids[1]);await run('saveInspection(true)');const nextId=run(`TC.cycle.entries[${JSON.stringify(ids[1])}].kontrollId`);
   assert.equal(latestCapture().recordId,nextId);assert.equal(run('S.selected.id'),ids[1]);assert.equal(run('TC.opened'),null);assert.equal(run('pendingPostSaveSignatureNavigation.goNext'),true);
-  deliverSaved(nextId);assert.equal(run('S.selected.id'),ids[2]);assert.equal(run('TC.opened.id'),ids[2]);
+  await deliverSaved(nextId);assert.equal(run('S.selected.id'),ids[2]);assert.equal(run('TC.opened.id'),ids[2]);
 
   // 5: TAGASI does not remove the saved record or create a draft and still navigates.
   await prepareNew(ids[3]);await run('saveInspection()');const cancelId=run(`TC.cycle.entries[${JSON.stringify(ids[3])}].kontrollId`);latestCapture();
@@ -982,9 +986,9 @@ await test('S1.5 post-save signature flow targets saved KontrollID and defers na
   assert.equal(run('TC.records.length'),rowsBefore+1);assert.equal(run('S.sessionChecked.size'),checkedBefore);cancelCapture();
 
   // 9: the existing manual VAATA KONTROLLI → ALLKIRJA MUSTAND path remains usable.
-  const latest=JSON.parse(JSON.stringify(run(`savedEntry(${JSON.stringify(ids[0])})`))),manual=run(`viewSavedInspection(${JSON.stringify(ids[0])},${JSON.stringify(latest)},TC.cycle.entries[${JSON.stringify(ids[0])}])`);
+ const latest=JSON.parse(JSON.stringify(run(`savedEntry(${JSON.stringify(ids[0])})`))),manual=run(`viewSavedInspection(${JSON.stringify(ids[0])},${JSON.stringify(latest)},TC.cycle.entries[${JSON.stringify(ids[0])}])`);await waitForAppDialog('VAATA KONTROLLI');
   assert.equal(el('appDialogTitle').textContent,'VAATA KONTROLLI');run("appDialogChoice('signature')");await manual;
-  assert.equal(latestCapture().recordId,duplicateId);assert.equal(run('pendingPostSaveSignatureNavigation'),null);deliverSaved(duplicateId);assert(el('cabTab').classList.contains('hidden')===false);
+  assert.equal(latestCapture().recordId,duplicateId);assert.equal(run('pendingPostSaveSignatureNavigation'),null);await deliverSaved(duplicateId);assert(el('cabTab').classList.contains('hidden')===false);
  }finally{env=priorEnv;storeDir=priorStore;clock.mono=priorClock.mono;clock.offset=priorClock.offset;}
 });
 await test('S1.5 Kontroll recordVersion survives restart and XLSX roundtrip, uses ID after row move, and advances on signed-field edit',async()=>{
@@ -1041,6 +1045,104 @@ await test('S1 signature draft list remains local-only and does not invoke workb
  assert(el('signatureDraftList').innerHTML.includes('Salvestatud allkirja mustandeid pole'));
  assert.equal(run('TC.revision'),before);assert.equal(run('TC.records.length'),rows);assert.equal(env.signatureStartCalls.length,0);
 });
+function s2Jcs(value){
+ if(value===null)return 'null';if(typeof value==='string'||typeof value==='boolean'||typeof value==='number')return JSON.stringify(value);
+ if(Array.isArray(value))return '['+value.map(s2Jcs).join(',')+']';
+ if(value&&typeof value==='object')return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+s2Jcs(value[k])).join(',')+'}';
+ throw new Error('Unsupported test JCS value');
+}
+function s2TestWorkbook(){const file=process.env.DTC_S2_SIGNATURE_FIXTURE;if(!file)throw Error('Set DTC_S2_SIGNATURE_FIXTURE to the v0.9.0 R4 workbook');return fs.readFileSync(file);}
+function s2TestPoints(file=process.env.DTC_S2_POINTS_JSON||path.join(root,'tests/signature/s1_5_poc_strokes.json')){return JSON.parse(fs.readFileSync(file,'utf8')).points;}
+async function s2MakeDraft(record,options={}){
+ const version=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);
+ assert(Number.isInteger(version.recordVersion)&&version.recordVersion>=1,'S2 draft target must have a persistent record version');
+ const pngPath=options.pngPath||process.env.DTC_S2_TEST_PNG;if(!pngPath)throw Error('Set DTC_S2_TEST_PNG to the canonical native test PNG');
+ const png=fs.readFileSync(pngPath),points=s2TestPoints(options.pointsPath),strokeCount=Math.max(...points.map(p=>p[0])),strokes={format:'dold-strokes/v1',canvasWidthPx:900,canvasHeightPx:300,points},geometry={format:'dold-geometry/v1',points:points.map(([stroke,point,x,y])=>[stroke,point,x,y])};
+ const strokeHash=hashBytes(Buffer.from(s2Jcs(strokes))),geometryHash=hashBytes(Buffer.from(s2Jcs(geometry))),pngHash=hashBytes(png),started=Number(run('Date.now()')),duration=1000,nonce=crypto.randomBytes(32).toString('hex');
+ const draft={schemaVersion:1,status:'S1_DRAFT',signatureId:'dtc-sign-'+crypto.randomUUID(),targetType:'Kontroll',recordId:record.syncId,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,kilpId:record.id,signerName:record.inspector,nonce,captureStartedAtUtcMs:started,captureEndedAtUtcMs:started+duration,captureDurationMs:duration,clockSource:'DEVICE_WALL_CLOCK_UNTRUSTED',inputMethod:'TOUCH',strokeCount,pointCount:points.length,canvasWidthPx:900,canvasHeightPx:300,points,pngBase64:png.toString('base64'),pngHash,strokeHash,geometryHash,rendererProfile:JSON.parse(fs.readFileSync(path.join(root,'tests/signature/s1_5_poc_strokes.json'),'utf8')).rendererProfile,deviceInstanceId:run('TC.deviceId'),appVersionName:'0.5.6.1',appVersionCode:57,androidRelease:'16',androidApiLevel:36,antiReuse:{algorithm:'dold-exact-reuse/v1',result:'UNIQUE',scope:'LOCAL_KNOWN_DATA',checkedAtUtcMs:started,checkedCount:env.signatureDraftPayloads.size,registryDigest:hashBytes(Buffer.from('[]')),matchingSignatureIds:[],geometryHash},targetMetadata:{workbookIdentity:run('TC.dbId'),inspectionDate:record.date,inspectorName:record.inspector,recordVersionSnapshotHash:version.recordVersionSnapshotHash}};
+ return draft;
+}
+async function s2RegisterDraft(draft){env.signatureDraftPayloads.set(draft.signatureId,draft);return draft;}
+function s2FreshPersistentRecord(){const value=run('TC.records.find(r=>r.persistentId&&r.syncId)');if(!value)throw Error('R4 workbook needs a persistent Kontroll record');return JSON.parse(JSON.stringify(value));}
+await test('S2 signature accepts local Kontroll capture into R4 sheets and Rich Data, then retries idempotently',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-production-commit',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
+  const beforeControls=await count('Kontrollid'),beforeSignatures=await count('Allkirjad'),beforePictures=await count('Allkirjade pildid');
+  await run(`onNativeSignatureDraftSaved(${JSON.stringify(JSON.stringify({signatureId:draft.signatureId}))})`);
+  const state=await run(`(async()=>{const c=await loadDoc('Kontrollid'),a=await loadDoc('Allkirjad'),p=await loadDoc('Allkirjade pildid'),j=await loadDoc('Allkirja_jaljed'),ar=s2SignatureRowsById(a,${JSON.stringify(draft.signatureId)}),pr=s2Rows(p,6,500).filter(r=>s2CellString(p,'A',r)===${JSON.stringify(draft.signatureId)}),jr=s2Rows(j,5,1048576).filter(r=>s2CellString(j,'A',r)===${JSON.stringify(draft.signatureId)});return {controlPointer:s2CellString(c,'AB',${record.row}),signatureRows:ar,signatureCount:ar.length,pictureCount:pr.length,pictureRow:pr[0],strokeCount:jr.length,signatureStatus:s2CellString(a,'F',ar[0]),effectiveStatus:s2CellString(a,'G',ar[0]),recordVersion:s2CellString(a,'I',ar[0]),recordHash:s2CellString(a,'J',ar[0]),proofHash:s2CellString(a,'BA',ar[0]),proof:s2CellString(a,'BN',ar[0]),snapshot:s2CellString(a,'S',ar[0]),imageCell:getCell(p,'F'+pr[0])?.getAttribute('vm'),mediaPath:s2CellString(p,'H',pr[0]),imageHash:s2CellString(p,'G',pr[0]),image:await s2ResolveRichPicture(S.zip,getCell(p,'F'+pr[0]))};})()`);
+  assert.equal(state.controlPointer,draft.signatureId);assert.equal(state.signatureCount,1);assert.equal(state.pictureCount,1);assert.equal(state.strokeCount,draft.pointCount);assert.equal(state.signatureStatus,'Kehtiv');assert.equal(state.effectiveStatus,'Kehtiv');assert.equal(Number(state.recordVersion),draft.recordVersion);assert.equal(state.imageCell,'3');assert.equal(state.imageHash,draft.pngHash);assert.equal(state.image.pngHash,draft.pngHash);assert.equal(state.mediaPath,state.image.mediaPath);assert.equal(state.proofHash,hashBytes(Buffer.from(state.proof)));assert.equal(state.recordHash,hashBytes(Buffer.from(state.snapshot)));assert.equal(JSON.parse(state.proof).antiReuse.scope,'LOCAL_KNOWN_DATA');
+  assert.equal(await count('Kontrollid'),beforeControls);assert.equal(await count('Allkirjad'),beforeSignatures+1);assert.equal(await count('Allkirjade pildid'),beforePictures+1);
+  const again=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(again.already,true);assert.equal(await count('Allkirjad'),beforeSignatures+1);assert.equal(await count('Allkirjade pildid'),beforePictures+1);
+  const stored=await run('persistWorkspace()');assert(Number(stored?.length)>0);
+  const recordId=record.syncId,signatureId=draft.signatureId;
+  env=makeContext();await run('TC.startupTask');assert.equal(run('TC.startupLoaded'),true,'workspace must restore after app context recreation');
+  await run('continueLastWorkingFile()');await run('continueCycle()');
+  const restored=run(`TC.records.find(r=>r.syncId===${JSON.stringify(recordId)})`);assert(restored,'saved Kontroll must survive app restart');
+  const restoredStatus=await run(`savedKontrollSignatureStatus(TC.records.find(r=>r.syncId===${JSON.stringify(recordId)}))`);assert.equal(restoredStatus,'Kehtiv (kohalikult kontrollitud)');
+  const restoredPointer=await run(`(async()=>{const d=await loadDoc('Kontrollid'),r=qsa(d,'row').find(x=>getCellVal(d,'AA',Number(x.getAttribute('r')))===${JSON.stringify(recordId)});return r&&getCellVal(d,'AB',Number(r.getAttribute('r')));})()`);assert.equal(restoredPointer,signatureId);
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature anti-reuse blocks same known strokes and preserves XLSX bytes',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-anti-reuse',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),first=await s2RegisterDraft(await s2MakeDraft(record));
+  const firstResult=await run(`commitProductionSignature(${JSON.stringify(first.signatureId)})`);assert(firstResult.ok);
+  const duplicate=await s2RegisterDraft(await s2MakeDraft(record));const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));
+  const code=await run(`(async()=>{try{await s2PrepareSignatureState(await JSON.parse(Android.readSignatureDraft(${JSON.stringify(duplicate.signatureId)})).data);return 'NO_BLOCK';}catch(e){return e.signatureCode||e.message;}})()`);
+  assert.equal(code,'DUPLICATE_CAPTURE');const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after));
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature transaction rolls back workbook changes when durable workspace save fails',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-save-rollback',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
+  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));env.setInjectFailure(true);
+  try{const result=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(result.ok,false);}finally{env.setInjectFailure(false);}
+  const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after));assert.equal(await count('Allkirjad'),2);assert.equal(env.signatureDraftPayloads.has(draft.signatureId),true);assert(alerts.some(x=>x.includes('Kontroll jäi salvestatuks')));
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature refuses unsupported signature workbook without modifying its active XLSX',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-unsupported',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
+  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})')),savedPath=run("S.paths.Allkirjad");run('S.paths.Allkirjad=null');
+  try{const result=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(result.ok,false);}finally{run(`S.paths.Allkirjad=${JSON.stringify(savedPath)}`);}
+  const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after));assert.equal(env.signatureDraftPayloads.has(draft.signatureId),true);assert(alerts.some(x=>x.includes('SIGNATURE_STRUCTURE_UNSUPPORTED')));
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature rejects changed Kontroll version before acceptance',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-stale-draft',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
+  await run(`(async()=>{const d=await loadDoc('Kontrollid'),old=Number(getCellVal(d,'H',${record.row})||0);setNum(d,'H',${record.row},(old+1)%6);S.zip.file(S.paths.Kontrollid,xmlStr(d));await reconcileKontrollSignatureVersions();})()`);
+  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));
+  const code=await run(`(async()=>{try{await s2PrepareSignatureState(await JSON.parse(Android.readSignatureDraft(${JSON.stringify(draft.signatureId)})).data);return 'NO_BLOCK';}catch(e){return e.signatureCode||e.message;}})()`);
+  assert.equal(code,'RECORD_CHANGED_DURING_CAPTURE');assert.equal(hashBytes(before),hashBytes(Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'))));
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature editing a signed Kontroll atomically revokes and preserves the previous proof',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-edit-revokes',s2TestWorkbook());await run('continueCycle()');await run('resetRingProgress()');run('TC.guard.remaining=100');
+  const id=run('activeCabinets()[0].id');await run(`openCab(${JSON.stringify(id)},'camera')`);el('inspector').value='S2 edit tester';run('setAllScores(4)');advance(61);await run('saveInspection()');
+  const saved=run(`savedEntry(${JSON.stringify(id)})`);assert(saved?.syncId);const draft=await s2RegisterDraft(await s2MakeDraft(saved));await run(`onNativeSignatureDraftSaved(${JSON.stringify(JSON.stringify({signatureId:draft.signatureId}))})`);
+  const beforeProof=await run(`(async()=>{const d=await loadDoc('Allkirjad'),r=s2SignatureRowsById(d,${JSON.stringify(draft.signatureId)})[0];return {proof:s2CellString(d,'BN',r),hash:s2CellString(d,'BA',r),id:s2CellString(d,'A',r)};})()`);
+  await openCabWithChoices(id,'camera',['edit']);run('setAllScores(3)');advance(61);await run('saveInspection()');
+  const revoked=await run(`(async()=>{const d=await loadDoc('Allkirjad'),r=s2SignatureRowsById(d,${JSON.stringify(draft.signatureId)})[0];return {status:s2CellString(d,'F',r),at:s2CellString(d,'P',r),reason:s2CellString(d,'Q',r),proof:s2CellString(d,'BN',r),hash:s2CellString(d,'BA',r),pointer:s2CellString(await loadDoc('Kontrollid'),'AB',${saved.row})};})()`);
+  assert.equal(revoked.status,'Tühistatud');assert(Number(revoked.at)>0);assert.equal(revoked.reason,'Kontrolli andmeid muudeti rakenduses');assert.equal(revoked.proof,beforeProof.proof);assert.equal(revoked.hash,beforeProof.hash);assert.equal(revoked.pointer,draft.signatureId);
+  run("onNativeSignatureCaptureCancelled('test cancel')");
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+await test('S2 signature re-sign after Kontroll edit cancels old proof and links the new signature',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  const alternatePng=process.env.DTC_S2_ALTERNATE_PNG;if(!alternatePng)throw Error('Set DTC_S2_ALTERNATE_PNG to the alternate canonical native PNG');
+  await freshWorkspace('s2-resign-after-edit',s2TestWorkbook());await run('continueCycle()');await run('resetRingProgress()');run('TC.guard.remaining=100');const signatureRowsBefore=await count('Allkirjad');
+  const id=run('activeCabinets()[0].id');await run(`openCab(${JSON.stringify(id)},'camera')`);el('inspector').value='S2 re-sign tester';run('setAllScores(4)');advance(61);await run('saveInspection()');const firstRecord=run(`savedEntry(${JSON.stringify(id)})`),oldId=firstRecord.syncId;run("onNativeSignatureCaptureCancelled('test first inspection')");
+  const first=await s2RegisterDraft(await s2MakeDraft(firstRecord));assert((await run(`commitProductionSignature(${JSON.stringify(first.signatureId)})`)).ok);
+  const oldProof=await run(`(async()=>{const d=await loadDoc('Allkirjad'),r=s2SignatureRowsById(d,${JSON.stringify(first.signatureId)})[0];return {proof:s2CellString(d,'BN',r),hash:s2CellString(d,'BA',r)};})()`);
+  await openCabWithChoices(id,'camera',['edit']);run('setAllScores(3)');advance(61);await run('saveInspection()');run("onNativeSignatureCaptureCancelled('test edit capture')");
+  const edited=run(`savedEntry(${JSON.stringify(id)})`);assert.equal(edited.syncId,oldId);const second=await s2RegisterDraft(await s2MakeDraft(edited,{pointsPath:path.join(root,'tests/signature/s2_alternate_strokes.json'),pngPath:alternatePng}));
+  assert.notEqual(second.signatureId,first.signatureId);assert.notEqual(second.strokeHash,first.strokeHash);assert((await run(`commitProductionSignature(${JSON.stringify(second.signatureId)})`)).ok);
+  const state=await run(`(async()=>{const d=await loadDoc('Allkirjad'),c=await loadDoc('Kontrollid'),old=s2SignatureRowsById(d,${JSON.stringify(first.signatureId)})[0],next=s2SignatureRowsById(d,${JSON.stringify(second.signatureId)})[0],target=qsa(c,'row').find(x=>getCellVal(c,'AA',Number(x.getAttribute('r')))===${JSON.stringify(oldId)});return {oldStatus:s2CellString(d,'F',old),oldProof:s2CellString(d,'BN',old),oldProofHash:s2CellString(d,'BA',old),newStatus:s2CellString(d,'F',next),supersedes:s2CellString(d,'O',next),pointer:getCellVal(c,'AB',Number(target.getAttribute('r'))),count:s2Rows(d,5,500).filter(r=>s2CellString(d,'A',r)).length};})()`);
+  assert.equal(state.oldStatus,'Tühistatud');assert.equal(state.oldProof,oldProof.proof);assert.equal(state.oldProofHash,oldProof.hash);assert.equal(state.newStatus,'Kehtiv');assert.equal(state.supersedes,first.signatureId);assert.equal(state.pointer,second.signatureId);assert.equal(state.count,signatureRowsBefore+2);
+  assert.equal(await run(`savedKontrollSignatureStatus(TC.records.find(r=>r.syncId===${JSON.stringify(oldId)}))`),'Kehtiv (kohalikult kontrollitud)');
+ }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
 await test('R4 scoring blank value is displayed as Ei rakendu',async()=>assertR4VisibleScore('','Ei rakendu'));
 await test('R4 scoring zero remains Ei ole / puudub',async()=>assertR4VisibleScore('0','Ei ole / puudub'));
 await test('R4 scoring one is Asendus puudub',async()=>assertR4VisibleScore('1','Asendus puudub'));
@@ -1051,7 +1153,7 @@ await test('R4 scoring five is Uus ja korras',async()=>assertR4VisibleScore('5',
 await test('R4 scoring saved-inspection detail distinguishes blank and numeric values',async()=>{
  const cabinet=run('S.cabinets[0].id');run(`S.selected=S.cabinets.find(c=>c.id===${JSON.stringify(cabinet)})`);
  const record={id:cabinet,date:'2026-10-23',inspector:'R4 inspector',syncId:'dtc-kontroll-r4-detail',ratings:{H:'',I:'0',J:'1',K:'2',L:'3',M:'4',N:'5'}};
- const pending=run(`viewSavedInspection(${JSON.stringify(cabinet)},${JSON.stringify(record)},{})`),body=el('appDialogBody').innerHTML;
+ const pending=run(`viewSavedInspection(${JSON.stringify(cabinet)},${JSON.stringify(record)},{})`);await waitForAppDialog('VAATA KONTROLLI');const body=el('appDialogBody').innerHTML;
  for(const expected of ['Visuaal: <b>– — Ei rakendu</b>','Termo: <b>0 — Ei ole / puudub</b>','Juhtmed / klemmid: <b>1 — Asendus puudub</b>','Ühendused: <b>2 — Ajutised lahendused</b>','Tolm / vent.: <b>3 — Vajab uuendamist</b>','Kaablid: <b>4 — Normi piires</b>','PE: <b>5 — Uus ja korras</b>'])assert(body.includes(expected),expected);
  run("appDialogChoice('back')");await pending;
 });

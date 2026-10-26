@@ -26,6 +26,6 @@ export DTC_S2_TEST_PNG="$OUT/s2-primary.png"
 export DTC_S2_V1_TEST_PNG="$OUT/s2-v1.png"
 export DTC_S2_ALTERNATE_PNG="$OUT/s2-alternate.png"
 export DTC_RUN_S2_SIGNATURE=1
-export DTC_TEST_FILTER='s2 signature'
+export DTC_TEST_FILTER="${DTC_TEST_FILTER:-s2 signature}"
 export CODEX_PRIMARY_RUNTIME_NODE_MODULES="${CODEX_PRIMARY_RUNTIME_NODE_MODULES:-/opt/codex/runtimes/codex-primary-runtime/dependencies/node/node_modules}"
 node "$ROOT/tests/headless-regression.cjs" "$FIXTURE" "${1:-/tmp/dold-s2-signature-tests}"

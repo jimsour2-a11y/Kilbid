@@ -1231,9 +1231,12 @@ async function s2AppendProductionSignature(state){
   if(state.priorSignatureId){state.revokedAtUtcMs=Date.now();state.revocationReason='Asendatud uue kinnitatud allkirjaga';await s2MarkSignatureRevoked(signatureDoc,state.priorSignatureId,state.draft.recordId,state.revocationReason,state.revokedAtUtcMs);}
   s2AddSignatureRecord(signatureDoc,state.signatureRow,state,state.signatureRow,state.targetRow,state.mediaPath,state.priorSignatureId);
   s2AppendStrokeRows(strokeDoc,state.draft.signatureId,state.strokes.points);
+  const appendedStrokeRows=s2Rows(strokeDoc,5,1048576).filter(row=>s2CellString(strokeDoc,'A',row)===state.draft.signatureId),serializedStrokeXml=xmlStr(strokeDoc),signatureIdText=String(state.draft.signatureId);let serializedIdOccurrences=0,searchFrom=0;
+  while((searchFrom=serializedStrokeXml.indexOf(signatureIdText,searchFrom))!==-1){serializedIdOccurrences++;searchFrom+=signatureIdText.length;}
+  state.strokeRowWriteDiagnostics={expected:state.strokes.points.length,domRows:appendedStrokeRows.length,firstDomRow:appendedStrokeRows.length?appendedStrokeRows[0]:null,lastDomRow:appendedStrokeRows.length?appendedStrokeRows[appendedStrokeRows.length-1]:null,serializedIdOccurrences};
   s2AddPictureRow(imageDoc,state.pictureRow,state.draft,state.signatureRow,state.rich.metadataIndex,state.mediaPath);
   setInline(controlDoc,'AB',state.targetRow,state.draft.signatureId);
-  candidate.file(paths.signature,xmlStr(signatureDoc));candidate.file(paths.strokes,xmlStr(strokeDoc));candidate.file(paths.images,xmlStr(imageDoc));candidate.file(paths.control,xmlStr(controlDoc));
+  candidate.file(paths.signature,xmlStr(signatureDoc));candidate.file(paths.strokes,serializedStrokeXml);candidate.file(paths.images,xmlStr(imageDoc));candidate.file(paths.control,xmlStr(controlDoc));
   await s2VerifyProductionCandidate(original,candidate,state,paths);
   return candidate;
 }
@@ -1251,7 +1254,16 @@ async function s2VerifyProductionCandidate(original,candidate,state,paths){
   const pixelCell=getCell(imageDoc,'F'+imageRows[0]);if(Number(pixelCell?.getAttribute('vm'))!==state.rich.metadataIndex+1)throw s2SignatureBlock('PICTURE_BINDING_INVALID','Picture-in-Cell vm indeks ei klapi.');
   const picture=await s2ResolveRichPicture(candidate,pixelCell);if(picture.pngHash!==state.draft.pngHash||picture.mediaPath!==state.mediaPath||s2CellString(imageDoc,'G',imageRows[0])!==state.draft.pngHash)throw s2SignatureBlock('HASH_MISMATCH','Rich Data viide ei lahenda allkirja PNG baite õigesti.');
   const imageRow=qsa(imageDoc,'row').find(x=>Number(x.getAttribute('r'))===imageRows[0]);if(Number(imageRow?.getAttribute('ht'))!==112.5||imageRow?.getAttribute('customHeight')!=='1')throw s2SignatureBlock('PICTURE_BINDING_INVALID','Allkirjapildi rea kõrgus ei vasta kinnitatud kujule.');
-  const strokeRows=s2Rows(strokeDoc,5,1048576).filter(row=>s2CellString(strokeDoc,'A',row)===state.draft.signatureId);if(strokeRows.length!==state.strokes.points.length)throw s2SignatureBlock('STROKES_INVALID','Kõiki allkirja puutepunkte ei kirjutatud.');
+  const strokeRows=s2Rows(strokeDoc,5,1048576).filter(row=>s2CellString(strokeDoc,'A',row)===state.draft.signatureId);if(strokeRows.length!==state.strokes.points.length){
+    const expectedPoints=state.strokes.points;let firstMissingPoint=null,lastCorrectPoint=null;
+    for(let i=0;i<expectedPoints.length;i++){
+      const row=strokeRows[i],expected=expectedPoints[i];
+      if(!row||['B','C','D','E','F'].some((col,j)=>Number(s2CellString(strokeDoc,col,row))!==Number(expected[j]))){firstMissingPoint=expected[1];break;}
+      lastCorrectPoint=expected[1];
+    }
+    const sheetData=qsa(strokeDoc,'sheetData')[0],rowElements=sheetData?qsa(sheetData,'row'):[],usedRows=rowElements.filter(row=>qsa(row,'c').some(s2CellHasValue)).map(row=>Number(row.getAttribute('r'))).filter(Number.isInteger),idRowRange=strokeRows.length?`${strokeRows[0]}-${strokeRows[strokeRows.length-1]}`:'puudub',usedRowRange=usedRows.length?`${Math.min(...usedRows)}-${Math.max(...usedRows)}`:'puudub',dimension=qsa(strokeDoc,'dimension')[0]?.getAttribute('ref')||'puudub',write=state.strokeRowWriteDiagnostics||{};
+    throw s2SignatureBlock('STROKES_INVALID',`Kõiki allkirja puutepunkte ei kirjutatud. Oodatud ${expectedPoints.length}; DOM ${write.domRows??'?'} (${write.firstDomRow??'?'}-${write.lastDomRow??'?'}); serialiseeritud AllkiriID esinemised ${write.serializedIdOccurrences??'?'}; uuesti loetud AllkiriID read ${strokeRows.length}; esimene puuduv PunktNr ${firstMissingPoint??'puudub'}; viimane korrektne PunktNr ${lastCorrectPoint??'puudub'}; AllkiriID ridade vahemik ${idRowRange}; kasutatud read ${usedRowRange}; dimension ${dimension}.`);
+  }
   for(let i=0;i<strokeRows.length;i++)for(let j=0;j<5;j++)if(Number(s2CellString(strokeDoc,s2ColumnName(j+2),strokeRows[i]))!==state.strokes.points[i][j])throw s2SignatureBlock('STROKES_INVALID','Allkirja puutepunkt muutus XLSX-i kirjutamisel.');
   await s2ValidateRichDataPackage(candidate,imageDoc);state.rich=state.rich||{metadataIndex:Number(pixelCell.getAttribute('vm'))-1};
 }

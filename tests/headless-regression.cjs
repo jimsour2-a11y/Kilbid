@@ -1053,12 +1053,20 @@ function s2Jcs(value){
 }
 function s2TestWorkbook(){const file=process.env.DTC_S2_SIGNATURE_FIXTURE;if(!file)throw Error('Set DTC_S2_SIGNATURE_FIXTURE to the v0.9.0 R4 workbook');return fs.readFileSync(file);}
 function s2TestPoints(file=process.env.DTC_S2_POINTS_JSON||path.join(root,'tests/signature/s1_5_poc_strokes.json')){return JSON.parse(fs.readFileSync(file,'utf8')).points;}
+function s2SyntheticPoints(total,strokeCount){
+ const points=[],counts=Array(strokeCount).fill(0);
+ for(let i=0;i<total;i++){
+  const stroke=Math.floor(i*strokeCount/total)+1,point=++counts[stroke-1];
+  points.push([stroke,point,(i*7919)%1000001,(i*104729+137)%1000001,i]);
+ }
+ return points;
+}
 const S2_TEST_RENDERER_V1='dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata';
 async function s2MakeDraft(record,options={}){
  const version=await run(`draftKontrollRecordVersion(TC.records.find(r=>r.syncId===${JSON.stringify(record.syncId)}))`);
  assert(Number.isInteger(version.recordVersion)&&version.recordVersion>=1,'S2 draft target must have a persistent record version');
  const rendererProfile=options.rendererProfile||JSON.parse(fs.readFileSync(path.join(root,'tests/signature/s1_5_poc_strokes.json'),'utf8')).rendererProfile,pngPath=options.pngPath||(rendererProfile===S2_TEST_RENDERER_V1?process.env.DTC_S2_V1_TEST_PNG:process.env.DTC_S2_TEST_PNG);if(!pngPath)throw Error('Set the matching canonical native test PNG for the selected renderer profile');
- const png=fs.readFileSync(pngPath),points=s2TestPoints(options.pointsPath),strokeCount=Math.max(...points.map(p=>p[0])),canvasWidthPx=options.canvasWidthPx??900,canvasHeightPx=options.canvasHeightPx??300,strokes={format:'dold-strokes/v1',canvasWidthPx,canvasHeightPx,points},geometry={format:'dold-geometry/v1',points:points.map(([stroke,point,x,y])=>[stroke,point,x,y])};
+ const png=fs.readFileSync(pngPath),points=options.points||s2TestPoints(options.pointsPath),strokeCount=Math.max(...points.map(p=>p[0])),canvasWidthPx=options.canvasWidthPx??900,canvasHeightPx=options.canvasHeightPx??300,strokes={format:'dold-strokes/v1',canvasWidthPx,canvasHeightPx,points},geometry={format:'dold-geometry/v1',points:points.map(([stroke,point,x,y])=>[stroke,point,x,y])};
  const strokeHash=hashBytes(Buffer.from(s2Jcs(strokes))),geometryHash=hashBytes(Buffer.from(s2Jcs(geometry))),pngHash=hashBytes(png),started=Number(run('Date.now()')),duration=1000,nonce=crypto.randomBytes(32).toString('hex');
  const draft={schemaVersion:1,status:'S1_DRAFT',signatureId:'dtc-sign-'+crypto.randomUUID(),targetType:'Kontroll',recordId:record.syncId,recordVersion:version.recordVersion,recordVersionSource:version.recordVersionSource,kilpId:record.id,signerName:record.inspector,nonce,captureStartedAtUtcMs:started,captureEndedAtUtcMs:started+duration,captureDurationMs:duration,clockSource:'DEVICE_WALL_CLOCK_UNTRUSTED',inputMethod:'TOUCH',strokeCount,pointCount:points.length,canvasWidthPx,canvasHeightPx,points,pngBase64:png.toString('base64'),pngHash,strokeHash,geometryHash,rendererProfile,deviceInstanceId:run('TC.deviceId'),appVersionName:'0.5.6.1',appVersionCode:57,androidRelease:'16',androidApiLevel:36,antiReuse:{algorithm:'dold-exact-reuse/v1',result:'UNIQUE',scope:'LOCAL_KNOWN_DATA',checkedAtUtcMs:started,checkedCount:env.signatureDraftPayloads.size,registryDigest:hashBytes(Buffer.from('[]')),matchingSignatureIds:[],geometryHash},targetMetadata:{workbookIdentity:run('TC.dbId'),inspectionDate:record.date,inspectorName:record.inspector,recordVersionSnapshotHash:version.recordVersionSnapshotHash}};
  return draft;
@@ -1095,6 +1103,37 @@ await test('S2 signature blocks non-integer and non-finite native canvas dimensi
   for(const width of [640.5,NaN,'640']){const draft=await s2MakeDraft(record,{canvasWidthPx:640,canvasHeightPx:760});draft.canvasWidthPx=width;env.cx.s2ValidationDraft=draft;const code=await run(`(async()=>{try{await s2ValidateDraft(s2ValidationDraft);return 'NO_BLOCK';}catch(e){return e.signatureCode||e.message;}})()`);assert.equal(code,'STROKES_INVALID');}
  }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
 });
+await test('S2 signature reports append/serialization/reparse counts and rolls back when a candidate loses one point',async()=>{
+ const previous={env,storeDir,clock:{...clock}};try{
+  await freshWorkspace('s2-stroke-roundtrip-loss-diagnostics',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
+  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));
+  run(`globalThis.__s2DiagnosticOriginalVerifier=s2VerifyProductionCandidate;s2VerifyProductionCandidate=async function(original,candidate,state,paths){try{globalThis.__s2DiagnosticStage='parse';const doc=await s2ParsePart(candidate,paths.strokes),matching=s2Rows(doc,5,1048576).filter(row=>s2CellString(doc,'A',row)===state.draft.signatureId);globalThis.__s2DiagnosticStage='remove';const last=qsa(qsa(doc,'sheetData')[0],'row').find(row=>Number(row.getAttribute('r'))===matching[matching.length-1]);last.parentNode.removeChild(last);globalThis.__s2DiagnosticStage='serialize';candidate.file(paths.strokes,xmlStr(doc));globalThis.__s2DiagnosticStage='verify';return await __s2DiagnosticOriginalVerifier(original,candidate,state,paths);}catch(e){globalThis.__s2DiagnosticVerifyError=e.stack||String(e);throw e;}};`);
+  const result=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(result.ok,false);
+  const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after),'candidate verification failure must leave the active workbook unchanged');assert(env.signatureDraftPayloads.has(draft.signatureId),'local draft must remain available for retry');
+  const error=alerts.findLast(message=>message.includes('Kõiki allkirja puutepunkte ei kirjutatud.'));if(!error)console.log('S2 STROKE DIAGNOSTIC INJECTION',run("({stage:globalThis.__s2DiagnosticStage,error:globalThis.__s2DiagnosticVerifyError})"),alerts.at(-1));assert(error,'field error should retain its specific stroke mismatch details');
+  const message=error.split('\n').at(-1);assert(message.includes(`DOM ${draft.pointCount}`));assert(message.includes(`serialiseeritud AllkiriID esinemised ${draft.pointCount}`));assert(message.includes(`uuesti loetud AllkiriID read ${draft.pointCount-1}`));assert.match(message,/esimene puuduv PunktNr \d+/);assert.match(message,/viimane korrektne PunktNr \d+/);assert.match(message,/kasutatud read \d+-\d+/);assert.match(message,/dimension /);
+ }finally{run("if(typeof __s2DiagnosticOriginalVerifier!=='undefined')s2VerifyProductionCandidate=__s2DiagnosticOriginalVerifier");env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+});
+for(const scenario of [{label:'224 points in 2 strokes',total:224,strokes:2},{label:'317 points in 1 stroke',total:317,strokes:1},{label:'360 points across multiple strokes',total:360,strokes:4},{label:'640 points across multiple strokes',total:640,strokes:5}]){
+ await test(`S2 signature stroke production ZIP round-trip preserves every raw value: ${scenario.label}`,async()=>{
+  const previous={env,storeDir,clock:{...clock}};try{
+   await freshWorkspace(`s2-stroke-roundtrip-${scenario.total}`,s2TestWorkbook());await run('continueCycle()');
+   const record=s2FreshPersistentRecord(),points=s2SyntheticPoints(scenario.total,scenario.strokes),draft=await s2RegisterDraft(await s2MakeDraft(record,{points,canvasWidthPx:640,canvasHeightPx:760}));
+   assert.equal(draft.pointCount,scenario.total);assert.equal(draft.strokeCount,scenario.strokes);
+   const saved=await run(`onNativeSignatureDraftSaved(${JSON.stringify(JSON.stringify({signatureId:draft.signatureId}))})`);assert(saved,'production signature path must return the completed draft');
+   const roundtrip=await run(`(async()=>{const packed=await S.zip.generateAsync({type:'uint8array'}),reopened=await JSZip.loadAsync(packed),j=await s2ParsePart(reopened,S.paths['Allkirja_jaljed']),a=await s2ParsePart(reopened,S.paths['Allkirjad']),rows=s2Rows(j,5,1048576).filter(r=>s2CellString(j,'A',r)===${JSON.stringify(draft.signatureId)}),rowDetails=rows.map(r=>({row:r,cells:['A','B','C','D','E','F'].map(c=>({ref:c+r,present:!!getCell(j,c+r),value:s2CellString(j,c,r)}))})),signatureRows=s2SignatureRowsById(a,${JSON.stringify(draft.signatureId)});return {rows:rowDetails,dimension:qsa(j,'dimension')[0]?.getAttribute('ref')||'',signatureCount:signatureRows.length,proof:signatureRows.length===1?JSON.parse(s2CellString(a,'BN',signatureRows[0])):null,zipBytes:packed.length};})()`);
+   assert.equal(roundtrip.signatureCount,1,'one production signature record should be committed');assert.equal(roundtrip.rows.length,scenario.total,'every saved raw point must survive packed XLSX and reparse');
+   const rowNumbers=roundtrip.rows.map(x=>x.row);assert.equal(new Set(rowNumbers).size,scenario.total,'no duplicate worksheet row numbers');
+   for(let i=0;i<scenario.total;i++){
+    const expected=['',...points[i].map(String)],actual=roundtrip.rows[i];assert.equal(actual.row,rowNumbers[0]+i,`point ${i+1} stays in sequence`);
+    for(let c=0;c<6;c++){assert(actual.cells[c].present,`point ${i+1} cell ${actual.cells[c].ref} exists`);assert.equal(actual.cells[c].value,c===0?draft.signatureId:expected[c],`point ${i+1} ${actual.cells[c].ref} round-trips exactly`);}
+   }
+   if(roundtrip.dimension){const lastDimensionRow=Number((roundtrip.dimension.split(':').at(-1).match(/\d+/)||['0'])[0]);assert(lastDimensionRow>=rowNumbers.at(-1),'existing worksheet dimension must include the last point row');}assert.equal(roundtrip.proof.strokeHash,draft.strokeHash,'proof retains original native canvas StrokeHash');
+   const afterRestart=await run(`(async()=>{const bytes=await S.zip.generateAsync({type:'uint8array'}),z=await JSZip.loadAsync(bytes),doc=await s2ParsePart(z,S.paths['Allkirja_jaljed']);return s2Rows(doc,5,1048576).filter(r=>s2CellString(doc,'A',r)===${JSON.stringify(draft.signatureId)}).length;})()`);
+   assert.equal(afterRestart,scenario.total,'reopened XLSX retains all points');
+  }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
+ });
+}
 await test('S2 signature accepts local Kontroll capture into R4 sheets and Rich Data, then retries idempotently',async()=>{
  const previous={env,storeDir,clock:{...clock}};try{
   await freshWorkspace('s2-production-commit',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));

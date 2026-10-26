@@ -27,3 +27,4 @@ S2 tests cover acceptance into existing R4 sheets/Rich Data, repeated-commit ide
 
 - No Android APK or physical-device test was run. Android SDK/Gradle are unavailable in this environment.
 - The test runner validates OOXML parts and hashes but cannot prove that Microsoft Excel for Android renders the new Picture-in-Cell display identically to the prototype. Verify the GitHub Actions APK on CAT S42 and open the exported workbook in current Microsoft Excel before production use.
+- A CI-only commit, `8fe08816d33156f934380d40c5599b3766ba58d5`, adds `foundation-v0.5.7` to the existing build workflow push trigger. It is present locally but could not be published: local `git push` has no HTTPS credentials, and the connected GitHub integration returned `403 Resource not accessible by integration` when asked to create the source blob. No Actions run or APK artifact exists yet.

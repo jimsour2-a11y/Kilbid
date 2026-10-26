@@ -28,9 +28,10 @@ public final class SignaturePngPocFixture {
     }
 
     public static void main(String[] args) throws Exception {
-        byte[] png = SignaturePngRenderer.renderCanonical(points());
+        boolean legacyV1 = args.length > 1 && "--v1".equals(args[1]);
+        byte[] png = legacyV1 ? SignaturePngRenderer.renderCanonicalV1(points()) : SignaturePngRenderer.renderCanonical(points());
         if (args.length > 0) Files.write(Path.of(args[0]), png);
-        System.out.println("profile=" + SignaturePngRenderer.PROFILE);
+        System.out.println("profile=" + (legacyV1 ? SignaturePngRenderer.PROFILE_V1 : SignaturePngRenderer.PROFILE));
         System.out.println("width=" + SignaturePngRenderer.CANONICAL_WIDTH);
         System.out.println("height=" + SignaturePngRenderer.CANONICAL_HEIGHT);
         System.out.println("sha256=" + SignatureCanonicalJson.sha256(png));

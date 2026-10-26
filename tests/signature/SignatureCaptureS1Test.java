@@ -179,18 +179,87 @@ public final class SignatureCaptureS1Test {
             check((image.getRGB(0, 0) >>> 24) == 0, "canonical background is not transparent");
             check(image.getRGB(450, 150) == 0xff000000, "canonical stroke is not visible at expected normalized position");
             check(SignatureCaptureCore.RENDERER_PROFILE.equals(d.rendererProfile), "draft does not name the production-candidate renderer");
-            check("dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata".equals(d.rendererProfile), "renderer profile contract changed unexpectedly");
+            check(SignaturePngRenderer.PROFILE_V2.equals(d.rendererProfile), "new draft does not name the fitted v2 renderer");
             SignatureCaptureCore.Draft anotherCanvas = simpleDraftSized(201, 101);
             check(d.pngHash.equals(anotherCanvas.pngHash) && Arrays.equals(d.pngBytes, anotherCanvas.pngBytes), "canonical PNG depends on physical canvas resolution");
-            check("a5cf891249a2ed6f135d88d6afd25f611573338458a1c4373acabc3515823887".equals(d.pngHash), "canonical renderer PNG golden vector changed");
+            check(SignatureCanonicalJson.sha256(d.pngBytes).equals(d.pngHash), "v2 PNG hash does not cover its exact output bytes");
             expect(IllegalArgumentException.class, () -> SignaturePngRenderer.renderCanonical(Collections.singletonList(d.points.get(0))));
+        });
+        test("fitted v2 enlarges a very small signature", () -> {
+            List<SignatureCaptureCore.Point> points = points(490_000, 490_000, 500_000, 500_000, 510_000, 510_000);
+            int[] fitted = inkBounds(SignaturePngRenderer.renderCanonical(points));
+            int[] legacy = inkBounds(SignaturePngRenderer.renderCanonicalV1(points));
+            check(boundsWidth(fitted) > 220 && boundsHeight(fitted) > 220, "small signature did not expand into the fitted area");
+            check(boundsWidth(legacy) < 30 && boundsHeight(legacy) < 30, "small-signature comparison no longer exercises the old mapping");
+        });
+        test("fitted v2 reduces a very large signature while preserving all ink", () -> {
+            List<SignatureCaptureCore.Point> points = points(50_000, 100_000, 500_000, 500_000, 950_000, 900_000);
+            int[] fitted = inkBounds(SignaturePngRenderer.renderCanonical(points));
+            int[] legacy = inkBounds(SignaturePngRenderer.renderCanonicalV1(points));
+            check(boundsWidth(fitted) * boundsHeight(fitted) < boundsWidth(legacy) * boundsHeight(legacy), "large signature was not fitted smaller");
+            check(fitted[0] >= 72 && fitted[1] >= 24 && fitted[2] <= 827 && fitted[3] <= 275, "large signature ink crossed the safe padding");
+        });
+        test("fitted v2 keeps canvas-edge strokes inside padding and centers them", () -> {
+            List<SignatureCaptureCore.Point> points = points(0, 0, 500_000, 500_000, 1_000_000, 1_000_000);
+            int[] bounds = inkBounds(SignaturePngRenderer.renderCanonical(points));
+            check(bounds[0] >= 72 && bounds[1] >= 24 && bounds[2] <= 827 && bounds[3] <= 275, "edge input was cropped at the PNG boundary");
+            check(Math.abs(boundsCenterX(bounds) - 449.5d) <= 1d && Math.abs(boundsCenterY(bounds) - 149.5d) <= 1d, "fitted ink is not centered");
+        });
+        test("fitted v2 preserves wide signature aspect ratio", () -> {
+            List<SignatureCaptureCore.Point> points = points(0, 480_000, 500_000, 500_000, 1_000_000, 520_000);
+            int[] bounds = inkBounds(SignaturePngRenderer.renderCanonical(points));
+            double centerlineRatio = (boundsWidth(bounds) - 9d) / (boundsHeight(bounds) - 9d);
+            check(boundsWidth(bounds) > 700 && boundsHeight(bounds) < 60, "wide signature did not use the wide fitted layout");
+            check(Math.abs(centerlineRatio - 25d) < 1d, "wide signature aspect ratio changed");
+        });
+        test("fitted v2 preserves tall signature aspect ratio", () -> {
+            List<SignatureCaptureCore.Point> points = points(480_000, 0, 500_000, 500_000, 520_000, 1_000_000);
+            int[] bounds = inkBounds(SignaturePngRenderer.renderCanonical(points));
+            double centerlineRatio = (boundsWidth(bounds) - 9d) / (boundsHeight(bounds) - 9d);
+            check(boundsHeight(bounds) > 230 && boundsWidth(bounds) < 40, "tall signature did not use the tall fitted layout");
+            check(Math.abs(centerlineRatio - 0.04d) < 0.01d, "tall signature aspect ratio changed");
+        });
+        test("fitted v2 output is deterministic and exactly 900x300", () -> {
+            List<SignatureCaptureCore.Point> points = SignaturePngPocFixture.points();
+            byte[] first = SignaturePngRenderer.renderCanonical(points), second = SignaturePngRenderer.renderCanonical(points);
+            java.awt.image.BufferedImage image = ImageIO.read(new ByteArrayInputStream(first));
+            check(image != null && image.getWidth() == 900 && image.getHeight() == 300, "v2 PNG dimensions changed");
+            check(Arrays.equals(first, second), "same v2 points produced different PNG bytes");
+            check(SignatureCanonicalJson.sha256(first).equals(SignatureCanonicalJson.sha256(second)), "same v2 points produced different PNG hashes");
+        });
+        test("v1 renderer remains byte-compatible for existing drafts and proofs", () -> {
+            byte[] png = SignaturePngRenderer.renderCanonicalV1(SignaturePngPocFixture.points());
+            check("ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f".equals(SignatureCanonicalJson.sha256(png)), "legacy v1 PNG bytes changed");
+            check(SignaturePngRenderer.isSupportedProductionProfile(SignaturePngRenderer.PROFILE_V1), "v1 production profile is no longer supported");
+            check(SignaturePngRenderer.isSupportedProductionProfile(SignaturePngRenderer.PROFILE_V2), "v2 production profile is not supported");
         });
         test("test-only block-letter POC vector has a fixed canonical PNG hash", () -> {
             byte[] png = SignaturePngRenderer.renderCanonical(SignaturePngPocFixture.points());
-            check("ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f".equals(SignatureCanonicalJson.sha256(png)), "POC PNG golden vector changed");
+            check("fdbc892694cedd0a9f2130ff7e9c096fed0f11028d3c91c30637a9b0008e42d4".equals(SignatureCanonicalJson.sha256(png)), "v2 POC PNG golden vector changed");
             java.awt.image.BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
             check(image != null && image.getWidth() == 900 && image.getHeight() == 300, "POC dimensions changed");
             check((image.getRGB(1, 1) >>> 24) == 0, "POC image background is not transparent");
+        });
+        test("stored v1 production drafts retain their PNG and renderer profile", () -> {
+            Path dir = Files.createTempDirectory("dold-s1-v1-production-");
+            try {
+                SignatureCaptureCore.Draft current = simpleDraft(0, 0, 100, 50);
+                byte[] v1Png = SignaturePngRenderer.renderCanonicalV1(current.points);
+                SignatureCaptureCore.Target target = new SignatureCaptureCore.Target(current.targetType, current.recordId,
+                        current.kilpId, current.signerName, current.recordVersion, current.recordVersionSource, current.targetMetadata);
+                SignatureCaptureCore.DeviceInfo device = new SignatureCaptureCore.DeviceInfo(current.deviceInstanceId,
+                        current.appVersionName, current.appVersionCode, current.androidRelease, current.androidApiLevel);
+                SignatureCaptureCore.Draft legacy = new SignatureCaptureCore.Draft(current.status, current.signatureId, target,
+                        current.nonce, current.captureStartedAtUtcMs, current.captureEndedAtUtcMs, current.captureDurationMs,
+                        current.points, current.strokeCount, current.canvasWidthPx, current.canvasHeightPx, v1Png,
+                        SignatureCanonicalJson.sha256(v1Png), current.strokeHash, current.geometryHash, device,
+                        "NOT_CHECKED", 0L, 0, "", Collections.emptyList(), SignaturePngRenderer.PROFILE_V1);
+                SignatureDraftStore store = new SignatureDraftStore(dir.toFile()); store.saveDraft(legacy);
+                SignatureCaptureCore.Draft restored = store.readDraftById(legacy.signatureId);
+                check(SignaturePngRenderer.PROFILE_V1.equals(restored.rendererProfile), "stored v1 profile was relabeled");
+                check(Arrays.equals(v1Png, restored.pngBytes), "stored v1 PNG bytes changed");
+                check(legacy.pngHash.equals(restored.pngHash), "stored v1 PNG hash changed");
+            } finally { deleteTree(dir); }
         });
         test("old S1 experimental drafts remain readable without relabeling their stored PNG", () -> {
             Path dir = Files.createTempDirectory("dold-s1-legacy-profile-");
@@ -302,6 +371,32 @@ public final class SignatureCaptureS1Test {
                 "device-0123456789abcdef0123456789abcdef", "0.5.6.1", 57, "16", 36);
         return SignatureCaptureCore.newSession(target, device, startUtc, startMono, ignored -> false);
     }
+
+    private static List<SignatureCaptureCore.Point> points(int... coordinates) {
+        if (coordinates == null || coordinates.length < 4 || coordinates.length % 2 != 0)
+            throw new IllegalArgumentException("At least two x/y points are required");
+        List<SignatureCaptureCore.Point> points = new ArrayList<>();
+        for (int i = 0; i < coordinates.length; i += 2)
+            points.add(new SignatureCaptureCore.Point(1, i / 2 + 1, coordinates[i], coordinates[i + 1], i / 2 * 10));
+        return points;
+    }
+
+    private static int[] inkBounds(byte[] png) throws Exception {
+        java.awt.image.BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
+        if (image == null) throw new AssertionError("PNG could not be decoded");
+        int minX = image.getWidth(), minY = image.getHeight(), maxX = -1, maxY = -1;
+        for (int y = 0; y < image.getHeight(); y++) for (int x = 0; x < image.getWidth(); x++) {
+            if ((image.getRGB(x, y) >>> 24) == 0) continue;
+            minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+        }
+        if (maxX < minX || maxY < minY) throw new AssertionError("PNG contains no ink");
+        return new int[]{minX, minY, maxX, maxY};
+    }
+
+    private static int boundsWidth(int[] bounds) { return bounds[2] - bounds[0] + 1; }
+    private static int boundsHeight(int[] bounds) { return bounds[3] - bounds[1] + 1; }
+    private static double boundsCenterX(int[] bounds) { return (bounds[0] + (double) bounds[2]) / 2d; }
+    private static double boundsCenterY(int[] bounds) { return (bounds[1] + (double) bounds[3]) / 2d; }
 
     private static SignatureCaptureCore.Draft simpleDraft(float x1, float y1, float x2, float y2) throws Exception {
         SignatureCaptureCore.Session s = session("Kontroll", "dtc-kontroll-test-1", null, Collections.emptyMap(), 1_700_000_000_000L, 1_000L);

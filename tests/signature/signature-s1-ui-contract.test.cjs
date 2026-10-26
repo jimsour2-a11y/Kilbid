@@ -7,6 +7,7 @@ const javaRoot = path.join(root, 'app/src/main/java/ee/dold/techcontrol');
 const dialog = fs.readFileSync(path.join(javaRoot, 'SignatureCaptureDialog.java'), 'utf8');
 const pad = fs.readFileSync(path.join(javaRoot, 'SignaturePadView.java'), 'utf8');
 const core = fs.readFileSync(path.join(javaRoot, 'SignatureCaptureCore.java'), 'utf8');
+const renderer = fs.readFileSync(path.join(javaRoot, 'SignaturePngRenderer.java'), 'utf8');
 const store = fs.readFileSync(path.join(javaRoot, 'SignatureDraftStore.java'), 'utf8');
 const main = fs.readFileSync(path.join(javaRoot, 'MainActivity.java'), 'utf8');
 const js = fs.readFileSync(path.join(root, 'app/src/main/assets/DOLD_TechControl_v0.5.3.js'), 'utf8');
@@ -37,5 +38,6 @@ check('saved Kontroll post-save capture uses the freshly persisted KontrollID an
 check('save, cancellation, and start-error callbacks all complete deferred post-save navigation', /function onNativeSignatureDraftSaved\([\s\S]*?finishPendingPostSaveSignatureNavigation\(\)/.test(js) && /function onNativeSignatureCaptureCancelled\([\s\S]*?completePostSaveSignatureWithoutDraft/.test(js) && /function onNativeSignatureCaptureError\([\s\S]*?completePostSaveSignatureWithoutDraft/.test(js));
 check('native TAGASI/cancel is forwarded to the WebView without changing draft contents', /onCaptureCancelled\(String reason\)[\s\S]*?sendSignatureCaptureCancelled\(reason\)/.test(main) && /private void sendSignatureCaptureCancelled\(String reason\)[\s\S]*?window\.onNativeSignatureCaptureCancelled/.test(main));
 check('signature capture dialog writes only the local draft and XLSX append runs in the app transaction', /new SignatureDraftStore\(getFilesDir\(\)\)/.test(main) && /store\.saveDraft\(draft\)/.test(dialog) && !/saveWorkspace|applySyncOperations|Allkirjad|Allkirja_jaljed/.test(dialog) && /skipSemanticJournal:true/.test(js) && /s2AppendProductionSignature/.test(js));
+check('new captures use fitted renderer v2 while existing v1 production drafts remain supported', /PROFILE_V1\s*=/.test(renderer) && /PROFILE_V2\s*=/.test(renderer) && /renderFittedCanonical\(points\)/.test(core) && /isSupportedProductionProfile\(draft\.rendererProfile\)/.test(main) && /S2_SIGNATURE_RENDERER_V1/.test(js) && /S2_SIGNATURE_RENDERER_V2/.test(js));
 
 console.log(`S1 UI CONTRACT ${passed}/${passed} PASS`);

@@ -10,7 +10,9 @@ import java.util.zip.DeflaterOutputStream;
 
 /** Canonical S1.5 renderer. It rasterizes normalized points, never a screenshot or imported image. */
 final class SignaturePngRenderer {
-    static final String PROFILE = "dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata";
+    static final String PROFILE_V1 = "dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata";
+    static final String PROFILE_V2 = "dold-signature-fitted-png-v2;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;ink-bounds;pad-8pct;preserve-aspect;center;png-filter-none-deflate-6-no-metadata";
+    static final String PROFILE = PROFILE_V2;
     static final int CANONICAL_WIDTH = 900;
     static final int CANONICAL_HEIGHT = 300;
     private static final int CANONICAL_PADDING_X = 72;
@@ -22,6 +24,71 @@ final class SignaturePngRenderer {
     private SignaturePngRenderer() {}
 
     static byte[] renderCanonical(List<SignatureCaptureCore.Point> points) {
+        return renderFittedCanonical(points);
+    }
+
+    static boolean isSupportedProductionProfile(String profile) {
+        return PROFILE_V1.equals(profile) || PROFILE_V2.equals(profile);
+    }
+
+    /** Current deterministic renderer. Fits normalized ink into the padded frame without changing aspect ratio. */
+    static byte[] renderFittedCanonical(List<SignatureCaptureCore.Point> points) {
+        if (points == null || points.size() < 2) throw new IllegalArgumentException("Allkirja jaoks on vaja vähemalt kahte punkti");
+        int width = CANONICAL_WIDTH, height = CANONICAL_HEIGHT;
+        int minX = 1_000_000, maxX = 0, minY = 1_000_000, maxY = 0;
+        int previousStroke = 0, previousPoint = 0, previousElapsed = -1;
+        java.util.Set<Long> positions = new java.util.HashSet<>();
+        for (SignatureCaptureCore.Point point : points) {
+            if (point == null || point.strokeNr < 1 || point.xNorm < 0 || point.xNorm > 1_000_000
+                    || point.yNorm < 0 || point.yNorm > 1_000_000 || point.elapsedMs < previousElapsed)
+                throw new IllegalArgumentException("Allkirja normaliseeritud punkt on vigane");
+            if (previousPoint == 0) {
+                if (point.strokeNr != 1 || point.pointNr != 1) throw new IllegalArgumentException("Allkirja punktide järjekord on vigane");
+            } else if (point.strokeNr == previousStroke) {
+                if (point.pointNr != previousPoint + 1) throw new IllegalArgumentException("Allkirja punktide järjekord on vigane");
+            } else if (point.strokeNr == previousStroke + 1 && point.pointNr == 1) {
+                // A new stroke starts at point one; renderer starts a round cap below.
+            } else {
+                throw new IllegalArgumentException("Allkirja joonte järjekord on vigane");
+            }
+            minX = Math.min(minX, point.xNorm); maxX = Math.max(maxX, point.xNorm);
+            minY = Math.min(minY, point.yNorm); maxY = Math.max(maxY, point.yNorm);
+            positions.add((((long) point.xNorm) << 20) | point.yNorm);
+            previousStroke = point.strokeNr; previousPoint = point.pointNr; previousElapsed = point.elapsedMs;
+        }
+        if (positions.size() < 2) throw new IllegalArgumentException("Allkirja geomeetria on liiga lühike");
+
+        double extentX = maxX - (double) minX, extentY = maxY - (double) minY;
+        double fitWidth = width - 2d * CANONICAL_PADDING_X - 2d * CANONICAL_RADIUS - 2d;
+        double fitHeight = height - 2d * CANONICAL_PADDING_Y - 2d * CANONICAL_RADIUS - 2d;
+        double scaleX = extentX > 0d ? fitWidth / extentX : Double.POSITIVE_INFINITY;
+        double scaleY = extentY > 0d ? fitHeight / extentY : Double.POSITIVE_INFINITY;
+        double scale = Math.min(scaleX, scaleY);
+        if (!Double.isFinite(scale) || scale <= 0d) throw new IllegalArgumentException("Allkirja geomeetria ei mahu PNG-pildile");
+        double centerX = (minX + (double) maxX) / 2d, centerY = (minY + (double) maxY) / 2d;
+        double outputCenterX = (width - 1d) / 2d, outputCenterY = (height - 1d) / 2d;
+
+        byte[] pixels = new byte[Math.multiplyExact(Math.multiplyExact(width, height), 4)]; // transparent RGBA
+        SignatureCaptureCore.Point previous = null;
+        int previousStrokeForRaster = 0;
+        for (SignatureCaptureCore.Point point : points) {
+            int x = (int) Math.round(outputCenterX + (point.xNorm - centerX) * scale);
+            int y = (int) Math.round(outputCenterY + (point.yNorm - centerY) * scale);
+            if (previous == null || point.strokeNr != previousStrokeForRaster) {
+                drawDisk(pixels, width, height, x, y, CANONICAL_RADIUS);
+            } else {
+                int previousX = (int) Math.round(outputCenterX + (previous.xNorm - centerX) * scale);
+                int previousY = (int) Math.round(outputCenterY + (previous.yNorm - centerY) * scale);
+                drawLine(pixels, width, height, previousX, previousY, x, y, CANONICAL_RADIUS);
+            }
+            previous = point;
+            previousStrokeForRaster = point.strokeNr;
+        }
+        return encodePng(width, height, pixels);
+    }
+
+    /** Exact renderer for already-created v1 drafts/proofs. Do not change its mapping or output. */
+    static byte[] renderCanonicalV1(List<SignatureCaptureCore.Point> points) {
         if (points == null || points.size() < 2) throw new IllegalArgumentException("Allkirja jaoks on vaja vähemalt kahte punkti");
         int width = CANONICAL_WIDTH, height = CANONICAL_HEIGHT;
         byte[] pixels = new byte[Math.multiplyExact(Math.multiplyExact(width, height), 4)]; // transparent RGBA

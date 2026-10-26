@@ -1,6 +1,6 @@
 {
   "purpose": "S2 test-only alternate capture rendered by SignaturePngRenderer",
-  "rendererProfile": "dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata",
+  "rendererProfile": "dold-signature-fitted-png-v2;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;ink-bounds;pad-8pct;preserve-aspect;center;png-filter-none-deflate-6-no-metadata",
   "dimensions": { "width": 900, "height": 300 },
   "points": [
     [1, 1, 150000, 220000, 0],

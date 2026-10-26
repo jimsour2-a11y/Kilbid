@@ -280,7 +280,7 @@ public class MainActivity extends Activity {
     }
 
     private void validateProductionDraftPng(SignatureCaptureCore.Draft draft) throws Exception {
-        if (!SignaturePngRenderer.PROFILE.equals(draft.rendererProfile))
+        if (!SignaturePngRenderer.isSupportedProductionProfile(draft.rendererProfile))
             throw new IllegalStateException("Selle allkirja renderdusprofiil ei sobi tootmiskinnituseks.");
         Bitmap bitmap = BitmapFactory.decodeByteArray(draft.pngBytes, 0, draft.pngBytes.length);
         if (bitmap == null) throw new IllegalStateException("Allkirja PNG-faili ei saa dekodeerida.");

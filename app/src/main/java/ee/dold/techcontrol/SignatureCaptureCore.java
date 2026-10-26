@@ -31,7 +31,7 @@ final class SignatureCaptureCore {
     private SignatureCaptureCore() {}
 
     static boolean isSupportedRendererProfile(String profile) {
-        return RENDERER_PROFILE.equals(profile) || LEGACY_EXPERIMENTAL_RENDERER_PROFILE.equals(profile);
+        return SignaturePngRenderer.isSupportedProductionProfile(profile) || LEGACY_EXPERIMENTAL_RENDERER_PROFILE.equals(profile);
     }
 
     interface SignatureIdLookup { boolean exists(String signatureId) throws Exception; }
@@ -408,7 +408,7 @@ final class SignatureCaptureCore {
 
             Map<String, Object> strokes = strokeObject(width, height, points);
             Map<String, Object> geometry = geometryObject(points);
-            byte[] png = SignaturePngRenderer.renderCanonical(points);
+            byte[] png = SignaturePngRenderer.renderFittedCanonical(points);
             String pngHash = SignatureCanonicalJson.sha256(png);
             String strokeHash = SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(strokes));
             String geometryHash = SignatureCanonicalJson.sha256(SignatureCanonicalJson.bytes(geometry));

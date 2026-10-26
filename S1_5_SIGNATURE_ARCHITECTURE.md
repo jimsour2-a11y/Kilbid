@@ -20,15 +20,21 @@ On reconciliation, a unique valid persistent ID with a supported, complete snaps
 
 `Parandus` remains unchanged: S1.5 uses a supplied positive `Parandused!L` value when available; otherwise the draft stays `UNRESOLVED`. No new repair-signature workflow was introduced.
 
-## Candidate production PNG renderer
+## Versioned production PNG renderers
 
-The renderer selected for S2 evaluation is:
+The original profile remains supported for existing drafts and proofs:
 
 `dold-signature-normalized-png-v1;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;pad-8pct;map-normalized-x-y;crop-none;png-filter-none-deflate-6-no-metadata`
 
-It rasterizes integer-millionth normalized stroke points, not a device screenshot. Output is fixed at 900×300 RGBA with a transparent background, opaque black ink, 9-pixel raster stroke, round disks/caps/joins, 8% padding on each axis, fixed-aspect coordinate mapping, no crop, PNG filter None, Deflate level 6, and no ancillary metadata. At least two distinct normalized positions are required; invalid order, non-monotonic elapsed values, or too-short geometry is rejected. One canonical PNG is used for the draft image and its `PNGHash`.
+Its renderer is kept byte-compatible. Validation never relabels its profile or recalculates its stored PNG/hash using a different algorithm.
 
-The deterministic block-letter test vector is in `tests/signature/s1_5_poc_strokes.json`. On the current JDK it produces 900×300 and SHA-256 `ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f`. Geometry and pixels are defined by the renderer. Byte-identical PNG output across Android/JDK/zlib versions is **not guaranteed**; `PNGHash` is the hash of the exact final bytes produced by that capture runtime. Physical Android verification remains required before adopting the profile for production.
+New captures use:
+
+`dold-signature-fitted-png-v2;900x300;transparent-rgba;black-opaque;stroke-9px;round-cap;round-join;ink-bounds;pad-8pct;preserve-aspect;center;png-filter-none-deflate-6-no-metadata`
+
+The v2 renderer reads integer-millionth normalized points, finds their ink bounds, reserves the 8% outer padding, and applies one uniform scale to fit the bounds in the 900×300 frame. It centers the result and rasterizes opaque black 9-pixel round strokes onto a transparent RGBA image. It never changes or stretches the raw points and does not crop ink. `StrokeHash` and `geometryHash` keep their existing inputs; `PNGHash` covers the exact v2 PNG bytes. The existing proof field stores the renderer profile, so no XLSX column or contract change is needed.
+
+The block-letter test vector is in `tests/signature/s1_5_poc_strokes.json`. On the current JDK, v2 produces 900×300 and SHA-256 `fdbc892694cedd0a9f2130ff7e9c096fed0f11028d3c91c30637a9b0008e42d4`; the v1 renderer remains pinned to `ff6af60c18f3736f1a480a7d2b31f464f89616ab3fd2d7135bd8198d8373e57f`. Byte-identical PNG output across Android/JDK/zlib versions is **not guaranteed**; each `PNGHash` is the hash of the exact final bytes produced by that capture runtime. Physical Android verification remains required.
 
 ## Local anti-reuse policy
 

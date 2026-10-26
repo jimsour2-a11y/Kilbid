@@ -20,8 +20,10 @@ SOURCES=(
 java -m jdk.compiler/com.sun.tools.javac.Main -encoding UTF-8 -d "$OUT" "${SOURCES[@]}"
 java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignatureCaptureS1Test
 java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignaturePngPocFixture "$OUT/s2-primary.png"
+java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignaturePngPocFixture "$OUT/s2-v1.png" --v1
 java -Djava.awt.headless=true -cp "$OUT" ee.dold.techcontrol.SignaturePngS2AlternateFixture "$OUT/s2-alternate.png"
 export DTC_S2_TEST_PNG="$OUT/s2-primary.png"
+export DTC_S2_V1_TEST_PNG="$OUT/s2-v1.png"
 export DTC_S2_ALTERNATE_PNG="$OUT/s2-alternate.png"
 export DTC_RUN_S2_SIGNATURE=1
 export DTC_TEST_FILTER='s2 signature'

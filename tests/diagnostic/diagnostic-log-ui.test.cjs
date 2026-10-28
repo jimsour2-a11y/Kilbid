@@ -40,8 +40,8 @@ test('signature events retain counts and short hashes but no evidence payload',(
   has(js,/DRAFT_SAVED.*strokeCount:.*pointCount:.*renderer:.*pngHash:.*strokeHash:.*geometryHash:/);
   no(js,/diagLog\([^\n]+(?:rawStroke|pngBase64|proofJson)\s*:/i);
 });
-test('diagnostic bridge exposes append stats copy export clear and version remains 0.5.6.1',()=>{
+test('diagnostic bridge exposes append stats copy export clear and version is 0.5.7',()=>{
   for(const method of ['appendDiagnosticEvent','getDiagnosticLogStats','copyDiagnosticLog','exportDiagnosticLog','clearDiagnosticLog'])if(!main.includes(method))throw new Error('missing '+method);
-  has(js,/const APP_VERSION='0\.5\.6\.1'/);has(main,/return "0\.5\.6\.1"/);
+  has(js,/const APP_VERSION='0\.5\.7'/);has(main,/return "0\.5\.7"/);
 });
 console.log(`DIAGNOSTIC_JS_UI PASS ${passed}/10`);

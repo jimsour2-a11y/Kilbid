@@ -976,7 +976,7 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public String getAppVersion() {
-            return "0.5.6.1";
+            return "0.5.7";
         }
     }
 

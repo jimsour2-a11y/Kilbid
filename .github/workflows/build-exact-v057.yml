@@ -1,0 +1,55 @@
+name: Build exact DOLD TechControl v0.5.7
+
+on:
+  push:
+    branches: [ "build-v0.5.7-00937a3" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CI bridge
+        uses: actions/checkout@v4
+
+      - name: Checkout exact source commit
+        shell: bash
+        run: |
+          git bundle verify dold-v057-build-00937a3.bundle
+          git fetch dold-v057-build-00937a3.bundle foundation-v0.5.7:refs/remotes/bundle/foundation-v0.5.7
+          git checkout --detach 00937a3410eb9960357478f26f128e61fa8f0293
+          test "$(git rev-parse HEAD)" = "00937a3410eb9960357478f26f128e61fa8f0293"
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify and name APK
+        shell: bash
+        run: |
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)"
+          test -x "$AAPT"
+          "$AAPT" dump badging app/build/outputs/apk/debug/app-debug.apk | tee apk-badging.txt
+          grep -F "package: name='ee.dold.techcontrol' versionCode='58' versionName='0.5.7'" apk-badging.txt
+          cp app/build/outputs/apk/debug/app-debug.apk DOLD-TechControl-v0.5.7.apk
+          sha256sum DOLD-TechControl-v0.5.7.apk | tee DOLD-TechControl-v0.5.7.apk.sha256
+          printf '%s\n' '00937a3410eb9960357478f26f128e61fa8f0293' > SOURCE_HEAD.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DOLD-TechControl-v0.5.7
+          path: |
+            DOLD-TechControl-v0.5.7.apk
+            DOLD-TechControl-v0.5.7.apk.sha256
+            apk-badging.txt
+            SOURCE_HEAD.txt

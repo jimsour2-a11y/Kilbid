@@ -28,6 +28,33 @@ function installationDeviceId(){
   try{id=localStorage.getItem(key)||'';if(!/^device-[a-f0-9]{32}$/.test(id)){id='device-'+uid();localStorage.setItem(key,id);}}catch(e){id='device-'+uid();}
   return id;
 }
+const DIAGNOSTIC_FORBIDDEN_KEYS=/(?:token|hmac|secret|nonce|raw.?stroke|stroke.?payload|stroke.?coordinates|png.?base64|proof.?json|workbook.?content)/i;
+function diagnosticContext(){return {installationId:TC.deviceId||installationDeviceId(),dbId:TC.dbId||'',epoch:TC.sync?.epoch||'',workbookName:S.fileName||TC.startupSnapshot?.fileName||'',revision:Number(TC.revision)||0};}
+function diagnosticSafeFields(fields={}){
+  const safe={};for(const [key,value] of Object.entries(fields||{})){if(DIAGNOSTIC_FORBIDDEN_KEYS.test(key)){safe[key]='[REDACTED]';continue;}if(['string','number','boolean'].includes(typeof value)||value==null){let item=value??'';if(typeof item==='string'&&/(?:dbId|epoch|deviceId|session)$/i.test(key)&&item.length>16)item=item.slice(0,8)+'…'+item.slice(-4);safe[key]=item;}}return safe;
+}
+function diagLog(level,component,event,fields={}){
+  try{if(window.Android&&typeof Android.appendDiagnosticEvent==='function')return !!Android.appendDiagnosticEvent(level,component,event,JSON.stringify(diagnosticSafeFields(fields)));}catch(e){}return false;
+}
+function formatDiagnosticBytes(bytes){const n=Math.max(0,Number(bytes)||0);return n<1024?`${n} B`:`${(n/1024).toFixed(n<10240?1:0)} KiB`;}
+function refreshDiagnosticPanel(){
+  const host=$('diagnosticStats');if(!host)return;
+  try{if(!window.Android||typeof Android.getDiagnosticLogStats!=='function')throw Error('UNAVAILABLE');const stats=JSON.parse(Android.getDiagnosticLogStats());host.textContent=`Kirjeid: ${Number(stats.count)||0} • Maht: ${formatDiagnosticBytes(stats.bytes)} • Viimane sündmus: ${stats.lastEventTime||'puudub'}`;}
+  catch(e){host.textContent='Diagnostika on saadaval Androidi rakenduses.';}
+}
+function copyDiagnosticLog(){
+  try{if(!window.Android||typeof Android.copyDiagnosticLog!=='function'||!Android.copyDiagnosticLog(JSON.stringify(diagnosticContext())))throw Error('COPY_FAILED');toast('Diagnostika kopeeritud');}
+  catch(e){toast('Diagnostikat ei saanud kopeerida.');}refreshDiagnosticPanel();
+}
+function exportDiagnosticLog(){
+  try{if(!window.Android||typeof Android.exportDiagnosticLog!=='function'||!Android.exportDiagnosticLog(JSON.stringify(diagnosticContext())))throw Error('EXPORT_FAILED');toast('Diagnostika jagamismenüü avatakse.');}
+  catch(e){toast('Diagnostikat ei saanud eksportida.');}refreshDiagnosticPanel();
+}
+async function clearDiagnosticLog(){
+  const choice=await showAppChoice('TÜHJENDA DIAGNOSTIKA','Kas kustutada kõik senised diagnostika sündmused?',[{value:'clear',label:'TÜHJENDA',primary:true},{value:'cancel',label:'TÜHISTA'}]);if(choice!=='clear')return;
+  try{if(!window.Android||typeof Android.clearDiagnosticLog!=='function'||!Android.clearDiagnosticLog())throw Error('CLEAR_FAILED');toast('Diagnostika tühjendatud.');}
+  catch(e){toast('Diagnostikat ei saanud tühjendada.');}refreshDiagnosticPanel();
+}
 function newSyncState(){return {schema:1,epoch:uid(),entities:{Kontroll:{},Puudus:{},Cabinet:{}},journal:[],appliedOps:[],conflicts:[],peerAcks:{},deviceSequences:{},sequence:0};}
 function syncFieldString(v){return String(v??'').trim();}
 function syncControlBase(r){return [r.id,r.date,r.inspector,String(r.start??'')].map(syncFieldString).join('|');}
@@ -247,6 +274,7 @@ async function handleImportFile(ev){
   const file=ev.target.files?.[0];if(!file)return;
   try{
     const bytes=new Uint8Array(await file.arrayBuffer()),kind=await detectIncomingFileKind(bytes,file.name);
+    diagLog('INFO','WORKSPACE','IMPORT_START',{kind:kind==='work-package'?'DTC':kind==='sync-package'?'DTCS':'XLSX',filename:file.name,bytes:bytes.length});
     if(kind==='sync-package'){
       if(typeof processSyncPackageBytes==='function')return processSyncPackageBytes(bytes,file.name,()=>{ev.target.value='';});
       throw Error('Sünkroonimispaketi vastuvõtt pole saadaval.');
@@ -256,20 +284,21 @@ async function handleImportFile(ev){
       throw Error('Tööpaketi vastuvõtt pole saadaval.');
     }
     return importXlsx(ev,bytes);
-  }catch(e){alert('Faili avamine ebaõnnestus. Telefoni töö jäi alles.\n'+(e.message||String(e)));ev.target.value='';}
+  }catch(e){diagLog('ERROR','WORKSPACE','IMPORT_FAILED',{code:'IMPORT_FAILED',filename:file.name,message:e.message||String(e)});alert('Faili avamine ebaõnnestus. Telefoni töö jäi alles.\n'+(e.message||String(e)));ev.target.value='';}
 }
 async function bootstrapSavedWorkspace(){
+  diagLog('INFO','WORKSPACE','RESTORE_START',{});
   try{
     const listed=await storeCall('list');const list=Array.isArray(listed)?listed:[];
     let issues=[];if(nativeStore()&&typeof Android.listWorkspaceErrors==='function'){try{const raw=JSON.parse(Android.listWorkspaceErrors());if(raw.ok&&Array.isArray(raw.data))issues=raw.data;}catch(e){issues=[];}}
-    if(!list.length){TC.startupLoaded=false;TC.startupError=issues.length?'Telefonis olev tööfail on vigane. Vali töö jätkamiseks uuesti XLSX.':'';renderStartupWorkspace();renderSyncStatus();return;}
+    if(!list.length){TC.startupLoaded=false;TC.startupError=issues.length?'Telefonis olev tööfail on vigane. Vali töö jätkamiseks uuesti XLSX.':'';diagLog('INFO','WORKSPACE','RESTORE_EMPTY',{issues:issues.length});renderStartupWorkspace();renderSyncStatus();return;}
     TC.startupWarning=issues.length?'Mõnda telefoni salvestatud tööfaili ei saanud avada; saad jätkata viimase terve koopiaga.':'';
     const latest=[...list].sort((a,b)=>(Date.parse(b.lastUsedAt||b.updatedAt||'')||Number(b.revision)||0)-(Date.parse(a.lastUsedAt||a.updatedAt||'')||Number(a.revision)||0))[0];
     const snap=await storeCall('get',latest.dbId);if(!snap||snap.schema!==1||!snap.workbookBase64)throw Error('Sisemine XLSX töövihik puudub või on vigane.');
     const bytes=decode64(snap.workbookBase64);if(snap.workbookHash&&await digest(bytes)!==snap.workbookHash)throw Error('Sisemise XLSX faili kontrollsumma ei klapi.');
     Object.assign(TC,{dbId:snap.dbId,registryKey:snap.registryKey||'',registryTokens:snap.registryTokens||[],cycle:snap.cycle||null,sync:snap.sync||null,signatureVersions:normalizeSignatureVersionMap(snap.signatureVersions),guard:snap.guard||{remaining:randomGap(),pending:null},revision:Number(snap.revision)||0,updatedAt:snap.updatedAt||null,localUsedAt:snap.lastUsedAt||snap.updatedAt||null,sourceHash:snap.sourceHash||'',baseWorkbookBase64:snap.baseWorkbookBase64||'',ready:false,opened:null,pending:{notice:'Taastatud telefoni salvestatud tööfail.'}});
-    S.inspector=snap.inspector||'';S.dirty=!!snap.dirty;await loadBook(bytes,snap.fileName||'DOLD_TechControl.xlsx');TC.startupLoaded=true;TC.activated=false;TC.startupError='';loadMinInspectionSetting();renderStartupWorkspace();
-  }catch(e){TC.startupLoaded=false;TC.startupError=e.message||String(e);TC.dbId=null;TC.cycle=null;TC.ready=false;S.zip=null;S.fileName='';S.cabinets=[];S.sessionChecked=new Set();renderStartupWorkspace();}
+    S.inspector=snap.inspector||'';S.dirty=!!snap.dirty;await loadBook(bytes,snap.fileName||'DOLD_TechControl.xlsx');TC.startupLoaded=true;TC.activated=false;TC.startupError='';diagLog('INFO','WORKSPACE','RESTORE_SUCCESS',{dbId:TC.dbId,revision:TC.revision,workbook:S.fileName||'',bytes:bytes.length});loadMinInspectionSetting();renderStartupWorkspace();
+  }catch(e){diagLog('ERROR','WORKSPACE','RESTORE_FAILED',{code:'WORKSPACE_RESTORE_FAILED',message:e.message||String(e)});TC.startupLoaded=false;TC.startupError=e.message||String(e);TC.dbId=null;TC.cycle=null;TC.ready=false;S.zip=null;S.fileName='';S.cabinets=[];S.sessionChecked=new Set();renderStartupWorkspace();}
 }
 async function continueLastWorkingFile(){if(!TC.startupLoaded){selectNewWorkbook();return;}TC.ready=false;TC.activated=true;$('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();renderStartupWorkspace();renderCyclePanel();showTab('home');}
 async function readMetadata(){
@@ -580,11 +609,14 @@ async function applySyncOperations(operations,senderDeviceId='',directConflictCh
 }
 async function persistWorkspace(){
   if(!TC.dbId||!S.zip)throw Error('Tööfail ei ole avatud');
-  await ensureSyncState();await reconcileKontrollSignatureVersions();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
-  const bytes=await S.zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
-  TC.localUsedAt=new Date().toISOString();
-  const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,signatureVersions:normalizeSignatureVersionMap(TC.signatureVersions),guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
-  await storeCall('put',snapshot);TC.startupLoaded=true;TC.startupSnapshot=snapshot;return bytes;
+  diagLog('INFO','WORKSPACE','SAVE_START',{dbId:TC.dbId,revision:Number(TC.revision)||0,workbook:S.fileName||''});
+  try{
+    await ensureSyncState();await reconcileKontrollSignatureVersions();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
+    const bytes=await S.zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
+    TC.localUsedAt=new Date().toISOString();
+    const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,signatureVersions:normalizeSignatureVersionMap(TC.signatureVersions),guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
+    await storeCall('put',snapshot);TC.startupLoaded=true;TC.startupSnapshot=snapshot;diagLog('INFO','WORKSPACE','SAVE_SUCCESS',{dbId:TC.dbId,revision:TC.revision,bytes:bytes.length});return bytes;
+  }catch(e){diagLog('ERROR','WORKSPACE','SAVE_FAILED',{code:'WORKSPACE_SAVE_FAILED',message:e.message||String(e),revision:Number(TC.revision)||0});throw e;}
 }
 function comparableCycleStart(cycle){
   const value=String(cycle?.startedAt||'').trim();if(!value)return'';
@@ -641,7 +673,7 @@ async function transaction(change,options={}){
 }
 function saveRingProgress(){/* Called only for explicit inspector changes, never from rendering. */if(TC.dbId&&!TC.busy)transaction(async()=>{});}
 function restoreRingProgress(){reconcileCycle();}
-async function loadBook(bytes,name){S.zip=await JSZip.loadAsync(bytes,{checkCRC32:true});S.fileName=name;await loadSharedStrings();await loadSheetPaths();for(const n of ['Kokkuvõte','Kontrollid','Puudused'])if(!S.paths[n]||!S.zip.file(S.paths[n]))throw Error('Leht puudub: '+n);await refreshFromWorkbook();}
+async function loadBook(bytes,name){diagLog('INFO','WORKSPACE','WORKBOOK_LOAD_START',{filename:name||'',bytes:bytes?.length||0});try{S.zip=await JSZip.loadAsync(bytes,{checkCRC32:true});S.fileName=name;await loadSharedStrings();await loadSheetPaths();for(const n of ['Kokkuvõte','Kontrollid','Puudused'])if(!S.paths[n]||!S.zip.file(S.paths[n]))throw Error('Leht puudub: '+n);await refreshFromWorkbook();diagLog('INFO','WORKSPACE','WORKBOOK_LOAD_SUCCESS',{filename:name||'',controls:TC.records.length,defects:TC.allDefects.length});}catch(e){diagLog('ERROR','WORKSPACE','WORKBOOK_LOAD_FAILED',{code:'WORKBOOK_LOAD_FAILED',filename:name||'',message:e.message||String(e)});throw e;}}
 async function mergeLocalIntoIncoming(local,incoming){
   if(!local.baseWorkbookBase64)throw Error('Varasema töö baaskoopia puudub');
   const base=await JSZip.loadAsync(decode64(local.baseWorkbookBase64)),ours=await JSZip.loadAsync(decode64(local.workbookBase64));
@@ -1224,6 +1256,7 @@ async function s2MarkSignatureRevoked(doc,signatureId,recordId,reason,revokedAtU
   if(proof.format!==S2_SIGNATURE_FORMATS.proof||proof.signatureId!==signatureId||proof.targetType!==targetType||proof.recordId!==recordId||s2CellString(doc,'BA',row)!==await digest(new TextEncoder().encode(signatureCanonicalJson(proof)))||signatureCanonicalJson(proof)!==proofText)throw s2SignatureBlock('PROOF_HASH_MISMATCH','Eelmise allkirja proof ei vasta talletatud SHA-256-le.');
   setInline(doc,'F',row,'Tühistatud');s2SetUtcExcelSerial(doc,'P',row,revokedAtUtcMs);setInline(doc,'Q',row,reason);
   s2SetFormulaCached(doc,'G',row,signatureEffectiveStatusFormula(targetType,row),'Tühistatud','string');
+  diagLog('INFO','SIGNATURE','REVOKED',{targetType,targetId:recordId,allkiriId:signatureId,status:'Tühistatud'});
   return {row,changed:true};
 }
 function s2AppendStrokeRows(doc,signatureId,strokePoints){
@@ -1361,7 +1394,7 @@ async function commitProductionSignature(signatureId){
   if(!window.Android||typeof Android.readSignatureDraft!=='function')throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE','Telefoni allkirjamustandit ei saa turvaliselt lugeda.');
   let envelope;try{envelope=JSON.parse(Android.readSignatureDraft(signatureId));}catch(e){throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE','Telefoni allkirjamustandit ei saa lugeda.');}
   if(!envelope?.ok||!envelope.data)throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE',envelope?.error||'Telefoni allkirjamustandit ei leitud.');
-  const draft=envelope.data;let state=null;
+  const draft=envelope.data;let state=null;diagLog('INFO','SIGNATURE','PRODUCTION_COMMIT_START',{targetType:draft.targetType,targetId:draft.recordId,allkiriId:draft.signatureId,recordVersion:draft.recordVersion,strokeCount:draft.strokeCount,pointCount:draft.pointCount,renderer:draft.rendererProfile,pngHash:String(draft.pngHash||'').slice(0,16),strokeHash:String(draft.strokeHash||'').slice(0,16),status:draft.status});
   const committed=await transaction(async()=>{
     state=await s2PrepareSignatureState(draft);
     if(state.already)return;
@@ -1370,8 +1403,9 @@ async function commitProductionSignature(signatureId){
   },{skipSemanticJournal:true,rollbackMessage:`Allkirja XLSX-i tehing ebaõnnestus. ${draft.targetType==='Parandus'?'Parandus':'Kontroll'} jäi salvestatuks ja allkirja mustand jäi telefoni.`});
   if(!committed)return {ok:false,already:false};
   if(!state)throw s2SignatureBlock('TRANSACTION_FAILED','Allkirja XLSX-tehing ei jõudnud tulemuseni.');
-  if(state.already)return {ok:true,already:true,signatureId};
+  if(state.already){diagLog('INFO','SIGNATURE','PRODUCTION_COMMIT_SUCCESS',{targetType:draft.targetType,targetId:draft.recordId,allkiriId:draft.signatureId,status:'Kehtiv',result:'IDEMPOTENT'});return {ok:true,already:true,signatureId};}
   const verifyDoc=await loadDoc('Allkirjad'),savedRows=s2SignatureRowsById(verifyDoc,signatureId);if(savedRows.length!==1||s2CellString(verifyDoc,'F',savedRows[0])!=='Kehtiv'||s2CellString(verifyDoc,'BA',savedRows[0])!==state.proofHash)throw s2SignatureBlock('TRANSACTION_VERIFY_FAILED','Allkirja salvestamist ei saanud pärast tehingut kinnitada. Kohalik mustand jäi alles.');
+  diagLog('INFO','SIGNATURE','PRODUCTION_COMMIT_SUCCESS',{targetType:draft.targetType,targetId:draft.recordId,allkiriId:draft.signatureId,recordVersion:draft.recordVersion,renderer:draft.rendererProfile,recordHash:String(state.recordHash||'').slice(0,16),proofHash:String(state.proofHash||'').slice(0,16),status:'Kehtiv'});
   return {ok:true,already:false,signatureId,recordId:draft.recordId};
 }
 async function retryProductionSignature(signatureId){
@@ -1392,8 +1426,8 @@ function completePostSaveSignatureWithoutDraft(reason){
 function startNativeSignatureCapture(target){
   if(!window.Android||typeof Android.startSignatureCapture!=='function'){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise aken pole saadaval.'))toast('Allkirja mustand vajab Androidi rakendust.');return false;}
   const payload={...target,deviceInstanceId:TC.deviceId||installationDeviceId()};
-  try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}return true;}
-  catch(e){if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}
+  try{const started=Android.startSignatureCapture(JSON.stringify(payload));if(!started){diagLog('ERROR','SIGNATURE','CAPTURE_START_FAILED',{code:'CAPTURE_START_FAILED',targetType:target.targetType,targetId:target.recordId,recordVersion:target.recordVersion});if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}diagLog('INFO','SIGNATURE','CAPTURE_START',{targetType:target.targetType,targetId:target.recordId,kilpId:target.kilpId,recordVersion:target.recordVersion});return true;}
+  catch(e){diagLog('ERROR','SIGNATURE','CAPTURE_START_FAILED',{code:'CAPTURE_START_FAILED',targetType:target.targetType,targetId:target.recordId,message:e.message||String(e)});if(!completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.'))toast('Allkirja mustandit ei saanud alustada.');return false;}
 }
 async function startKontrollSignatureDraft(record){
   const id=persistentSyncId('Kontroll',record?.persistentId||record?.syncId);if(!id){toast('Sellel kontrollil puudub püsiv KontrollID.');return false;}
@@ -1425,17 +1459,20 @@ async function onNativeSignatureDraftSaved(raw){
   let draft;
   try{draft=typeof raw==='string'?JSON.parse(raw):raw;if(!draft?.signatureId)throw Error('AllkiriID puudub');}
   catch(e){toast('Allkirja mustand salvestati telefoni, kuid seda ei saanud tööfailiga siduda.',5500);await refreshSignatureDrafts();finishPendingPostSaveSignatureNavigation();return null;}
+  diagLog('INFO','SIGNATURE','DRAFT_SAVED',{targetType:draft.targetType,targetId:draft.recordId,allkiriId:draft.signatureId,recordVersion:draft.recordVersion,strokeCount:draft.strokeCount,pointCount:draft.pointCount,renderer:draft.rendererProfile,pngHash:String(draft.pngHash||'').slice(0,16),strokeHash:String(draft.strokeHash||'').slice(0,16),geometryHash:String(draft.geometryHash||'').slice(0,16),status:draft.status});
   try{
     const result=await commitProductionSignature(draft.signatureId);
     toast(result.already?'Allkiri on selles tööfailis juba salvestatud. Olek: Kehtiv.':`${draft.targetType==='Parandus'?'Paranduse':'Kontrolli'} allkiri kinnitati tööfailis. Olek: Kehtiv.`,5000);
-  }catch(e){toast(`${draft.targetType==='Parandus'?'Parandus':'Kontroll'} salvestatud. Allkirja mustand jäi telefoni; XLSX-i kinnitamine ebaõnnestus. ${e.message||''}`,7000);}
+  }catch(e){diagLog('ERROR','SIGNATURE','PRODUCTION_COMMIT_FAILED',{code:e.code||e.message||'SIGNATURE_COMMIT_FAILED',targetType:draft.targetType,targetId:draft.recordId,allkiriId:draft.signatureId,message:e.message||String(e)});toast(`${draft.targetType==='Parandus'?'Parandus':'Kontroll'} salvestatud. Allkirja mustand jäi telefoni; XLSX-i kinnitamine ebaõnnestus. ${e.message||''}`,7000);}
   await refreshSignatureDrafts();finishPendingPostSaveSignatureNavigation();return draft;
 }
 function onNativeSignatureCaptureCancelled(reason){
+  diagLog('INFO','SIGNATURE','CAPTURE_CANCEL',{reason:reason||'USER_CANCELLED'});
   if(completePostSaveSignatureWithoutDraft(''))return;
   if(reason&&String(reason).includes('suurus muutus'))toast(reason,4500);
 }
 function onNativeSignatureCaptureError(message){
+  diagLog('ERROR','SIGNATURE','CAPTURE_FAILED',{code:'CAPTURE_FAILED',message:message||''});
   if(completePostSaveSignatureWithoutDraft(message?`Allkirjastamise aken ei avanenud: ${message}`:'Allkirjastamise aken ei avanenud.'))return;
   toast(message||'Allkirjastamist ei saanud alustada.',4500);
 }
@@ -1554,6 +1591,7 @@ async function saveInspection(goNext=false){
   if($('dDesc')&&!stageDefect())return;if(!await ensurePresence())return;
   const opened=TC.opened,date=$('inspectionDate').value||localDateIso();if(!/^\d{4}-\d{2}-\d{2}$/.test(date)){toast('Kontrolli kuupäev on vigane');return;}
   const duration=inspectionSeconds(),ended=new Date(),start=new Date(opened.startedAt),wasEdit=!!opened.existing,wasNewDuplicate=!!opened.forceNew;
+  diagLog('INFO','KONTROLL','SAVE_START',{kilpId:c.id,kontrollId:opened.existing?.syncId||'',recordVersion:TC.signatureVersions?.[opened.existing?.syncId]?.recordVersion||0,duration:Math.round(duration),mode:wasEdit?'EDIT':wasNewDuplicate?'DUPLICATE':'NEW'});
   const ok=await transaction(async()=>{
     const ctr=await loadDoc('Kontrollid'),def=await loadDoc('Puudused'),styles=await ensureTimeStyles();
     const row=opened.existing?.row||firstEmptyRow(ctr,'B',5,Math.max(10000,...qsa(ctr,'row').map(x=>Number(x.getAttribute('r'))))+1);
@@ -1604,11 +1642,13 @@ async function saveInspection(goNext=false){
   if(ok){
     stopInspectionTimer();TC.opened=null;toast(`${c.id} ${wasEdit?'muudatused ':''}salvestatud telefoni • ${Math.round(duration)} s`);
     const controlId=persistentSyncId('Kontroll',TC.cycle?.entries?.[c.id]?.kontrollId),savedRecord=controlId?TC.records.find(r=>r.id===c.id&&r.syncId===controlId):null;
+    diagLog('INFO','KONTROLL','SAVE_SUCCESS',{kilpId:c.id,kontrollId:controlId||'',recordVersion:TC.signatureVersions?.[controlId]?.recordVersion||0,duration:Math.round(duration),cycleId:TC.cycle?.id||''});
+    for(const row of TC.cycle?.entries?.[c.id]?.defectRows||[]){const defect=TC.allDefects.find(item=>item.row===row);if(defect)diagLog('INFO','PUUDUS',defect.closed?'UPDATE':'CREATE',{puudusId:defect.syncId||'',kilpId:defect.id,kontrollId:controlId||'',status:defect.closed?'CLOSED':'OPEN',priority:defect.grade||''});}
     if(!savedRecord){toast('Kontroll salvestatud. Allkirja mustand jäi lisamata, sest salvestatud KontrollID kirjet ei leitud.',5000);if(goNext)openNextCabinet(c.id);else showTab('cab');return;}
     pendingPostSaveSignatureNavigation={cabinetId:c.id,controlId,goNext:!!goNext};
     const started=await startKontrollSignatureDraft(savedRecord);
     if(!started&&pendingPostSaveSignatureNavigation)completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.');
-  }
+  }else diagLog('ERROR','KONTROLL','SAVE_FAILED',{code:'KONTROLL_SAVE_FAILED',kilpId:c.id,kontrollId:opened.existing?.syncId||''});
 }
 async function saveCabinetStatus(){if(TC.busy||!S.selected)return;const c=S.selected,status=$('cabStatus').value;if(await transaction(async()=>{const sum=await loadDoc('Kokkuvõte');setInline(sum,'H',c.row,status);S.zip.file(S.paths['Kokkuvõte'],xmlStr(sum));S.dirty=true;})){TC.opened=null;showTab('cab');toast(c.id+' staatus salvestatud telefoni');}}
 function parandusDateTimeLabel(value){const n=Number(value);if(!Number.isFinite(n))return String(value||'—');const ms=Date.UTC(1899,11,30)+n*86400000;return Number.isFinite(ms)?new Date(ms).toLocaleString('et-EE'):'—';}
@@ -1621,6 +1661,7 @@ async function viewParandus(recordId){
 async function saveRepair(){
   if(TC.busy||!S.selectedDefect)return;const d=S.selectedDefect,repairer=$('repairer').value.trim(),work=$('repairWork').value.trim();if(!repairer||!work){toast('Sisesta töö teostaja ja tehtud töö');return;}if(!confirm(d.id+'\nMärkida puudus parandatuks?'))return;
   const performedAtUtcMs=Date.now(),parandusId=`dtc-work-${uid()}`;let signatureUnavailable='';
+  diagLog('INFO','PARANDUS','SAVE_START',{parandusId,puudusId:d.syncId||'',kontrollId:d.kontrollId||'',kilpId:d.id,recordVersion:1});
   const saved=await transaction(async()=>{
     const def=await loadDoc('Puudused');if(getCellVal(def,'B',d.row)!==d.id||getCellVal(def,'M',d.row))throw Error('Puudus on juba suletud või muutunud');const now=new Date(performedAtUtcMs),styles=await ensureTimeStyles();setInline(def,'L',d.row,repairer);setDateTime(def,'M',d.row,now);ensureCell(def,'M',d.row).setAttribute('s',styles.time);setInline(def,'O',d.row,localTimeText(now)+' • '+work);S.zip.file(S.paths.Puudused,xmlStr(def));
     if(S.paths.Parandused&&S.zip.file(S.paths.Parandused)){
@@ -1635,6 +1676,8 @@ async function saveRepair(){
     S.inspector=repairer;S.dirty=true;
   });
   if(!saved)return;
+  diagLog('INFO','PUUDUS','CLOSE',{puudusId:d.syncId||'',kilpId:d.id,kontrollId:d.kontrollId||'',status:'CLOSED'});
+  diagLog('INFO','PARANDUS','SAVE_SUCCESS',{parandusId,puudusId:d.syncId||'',kontrollId:d.kontrollId||'',kilpId:d.id,recordVersion:1,signature:signatureUnavailable?'SKIPPED':'REQUESTED'});
   S.selectedDefect=null;
   const savedRecord=TC.parandused.find(r=>r.recordId===parandusId);
   if(savedRecord){pendingPostSaveParandusNavigation={recordId:parandusId};if(signatureUnavailable){completePostSaveSignatureWithoutDraft(signatureUnavailable);return;}const started=await startParandusSignatureDraft(parandusId);if(!started&&pendingPostSaveParandusNavigation)completePostSaveSignatureWithoutDraft('Allkirjastamise akent ei saanud avada.');return;}
@@ -1763,6 +1806,7 @@ async function createDirectPackageTransfer(bytes,phase,pairing){
   if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);
   if(!DIRECT_SYNC_CHUNK_PHASES.has(phase)||!bytes.length||bytes.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
   const meta={format:DIRECT_SYNC_CHUNK_FORMAT,version:1,type:'PACKAGE_META',transferId:'dtc-transfer-'+uid(),phase,packageType:'dtcs',totalBytes:bytes.length,packageSha256:await digest(bytes),chunkSize:DIRECT_SYNC_CHUNK_BYTES,chunkCount:Math.ceil(bytes.length/DIRECT_SYNC_CHUNK_BYTES),sessionId:pairing.sessionId,lineage:pairing.lineage};
+  diagLog('INFO','LAN','TRANSFER_PREPARED',{transfer:meta.transferId,phase,totalBytes:meta.totalBytes,chunkSize:meta.chunkSize,chunkCount:meta.chunkCount,sha256:meta.packageSha256.slice(0,16)});
   return {meta,bytes};
 }
 function directChunkRequest(meta,index){
@@ -1772,10 +1816,11 @@ function directChunkRequest(meta,index){
 function directChunkData(transfer,index){
   const {meta,bytes}=transfer;if(!Number.isInteger(index)||index<0||index>=meta.chunkCount)throw Error('CHUNK_INDEX_INVALID');
   const start=index*meta.chunkSize,end=Math.min(bytes.length,start+meta.chunkSize),chunk=bytes.slice(start,end);
+  diagLog('INFO','LAN','CHUNK_TX',{transfer:meta.transferId,chunk:`${index+1}/${meta.chunkCount}`,bytes:chunk.length,attempt:1,status:'OK'});
   return directChunkControl({format:DIRECT_SYNC_CHUNK_FORMAT,version:1,type:'CHUNK_DATA',transferId:meta.transferId,phase:meta.phase,chunkIndex:index,chunkCount:meta.chunkCount,totalBytes:meta.totalBytes,packageSha256:meta.packageSha256,data:bytesToBase64(chunk),sessionId:meta.sessionId,lineage:meta.lineage});
 }
 function createDirectChunkAssembler(meta,pairing,expectedPhase=''){
-  validateDirectPackageMeta(meta,pairing,expectedPhase);return {meta,chunks:new Map(),receivedBytes:0};
+  validateDirectPackageMeta(meta,pairing,expectedPhase);diagLog('INFO','LAN','TRANSFER_RX_START',{transfer:meta.transferId,phase:meta.phase,totalBytes:meta.totalBytes,chunkSize:meta.chunkSize,chunkCount:meta.chunkCount,sha256:meta.packageSha256.slice(0,16)});return {meta,chunks:new Map(),receivedBytes:0};
 }
 function directNextMissingChunk(assembler){for(let i=0;i<assembler.meta.chunkCount;i++)if(!assembler.chunks.has(i))return i;return -1;}
 function directChunkFieldsMatch(meta,message){return message.transferId===meta.transferId&&message.phase===meta.phase&&message.chunkCount===meta.chunkCount&&message.totalBytes===meta.totalBytes&&message.packageSha256===meta.packageSha256&&message.sessionId===meta.sessionId&&message.lineage===meta.lineage;}
@@ -1783,13 +1828,13 @@ function addDirectChunk(assembler,message){
   const meta=assembler.meta;if(!message||message.type!=='CHUNK_DATA'||!directChunkFieldsMatch(meta,message)||!Number.isInteger(message.chunkIndex)||message.chunkIndex<0||message.chunkIndex>=meta.chunkCount||typeof message.data!=='string')throw Error('CHUNK_DATA_INVALID');
   const chunk=decode64(message.data),expected=message.chunkIndex===meta.chunkCount-1?meta.totalBytes-meta.chunkSize*(meta.chunkCount-1):meta.chunkSize;
   if(chunk.length!==expected)throw Error('CHUNK_SIZE_MISMATCH');
-  const prior=assembler.chunks.get(message.chunkIndex);if(prior){if(prior.length!==chunk.length||prior.some((value,index)=>value!==chunk[index]))throw Error('CHUNK_DUPLICATE_MISMATCH');return {duplicate:true,complete:directNextMissingChunk(assembler)<0,nextIndex:directNextMissingChunk(assembler)};}
-  assembler.chunks.set(message.chunkIndex,chunk);assembler.receivedBytes+=chunk.length;const nextIndex=directNextMissingChunk(assembler);return {duplicate:false,complete:nextIndex<0,nextIndex};
+  const prior=assembler.chunks.get(message.chunkIndex);if(prior){if(prior.length!==chunk.length||prior.some((value,index)=>value!==chunk[index])){diagLog('ERROR','LAN','CHUNK_DUPLICATE_MISMATCH',{code:'CHUNK_DUPLICATE_MISMATCH',transfer:meta.transferId,chunk:`${message.chunkIndex+1}/${meta.chunkCount}`});throw Error('CHUNK_DUPLICATE_MISMATCH');}diagLog('WARN','LAN','CHUNK_DUPLICATE',{transfer:meta.transferId,chunk:`${message.chunkIndex+1}/${meta.chunkCount}`,bytes:chunk.length,attempt:2,status:'DUPLICATE'});return {duplicate:true,complete:directNextMissingChunk(assembler)<0,nextIndex:directNextMissingChunk(assembler)};}
+  assembler.chunks.set(message.chunkIndex,chunk);assembler.receivedBytes+=chunk.length;const nextIndex=directNextMissingChunk(assembler);diagLog('INFO','LAN','CHUNK_RX',{transfer:meta.transferId,chunk:`${message.chunkIndex+1}/${meta.chunkCount}`,bytes:chunk.length,attempt:1,status:'OK'});return {duplicate:false,complete:nextIndex<0,nextIndex};
 }
 async function assembleDirectChunks(assembler){
-  const meta=assembler.meta,next=directNextMissingChunk(assembler);if(next>=0)throw Error('CHUNK_MISSING');if(assembler.receivedBytes!==meta.totalBytes)throw Error('CHUNK_TOTAL_SIZE_MISMATCH');
+  const meta=assembler.meta,next=directNextMissingChunk(assembler);if(next>=0){diagLog('ERROR','LAN','CHUNK_MISSING',{code:'CHUNK_MISSING',transfer:meta.transferId,chunk:`${next+1}/${meta.chunkCount}`});throw Error('CHUNK_MISSING');}if(assembler.receivedBytes!==meta.totalBytes){diagLog('ERROR','LAN','SIZE_MISMATCH',{code:'CHUNK_TOTAL_SIZE_MISMATCH',transfer:meta.transferId,expected:meta.totalBytes,actual:assembler.receivedBytes});throw Error('CHUNK_TOTAL_SIZE_MISMATCH');}
   const bytes=new Uint8Array(meta.totalBytes);let offset=0;for(let i=0;i<meta.chunkCount;i++){const chunk=assembler.chunks.get(i);if(!chunk)throw Error('CHUNK_MISSING');bytes.set(chunk,offset);offset+=chunk.length;}
-  if(offset!==meta.totalBytes||await digest(bytes)!==meta.packageSha256)throw Error('CHUNK_SHA_MISMATCH');return bytes;
+  const actualSha=await digest(bytes);if(offset!==meta.totalBytes||actualSha!==meta.packageSha256){diagLog('ERROR','LAN','SHA_MISMATCH',{code:'CHUNK_SHA_MISMATCH',transfer:meta.transferId,expected:meta.packageSha256.slice(0,16),actual:actualSha.slice(0,16)});throw Error('CHUNK_SHA_MISMATCH');}diagLog('INFO','LAN','PACKAGE_ASSEMBLED',{transfer:meta.transferId,totalBytes:bytes.length,chunkCount:meta.chunkCount,sha256:actualSha.slice(0,16),status:'OK'});return bytes;
 }
 function supportsR4DirectSync(){return !!(window.Android&&typeof Android.startLanSyncSessionDeferred==='function'&&typeof Android.respondLanSyncSession==='function');}
 function directPairingPayload(pairing){
@@ -1965,6 +2010,7 @@ async function runDirectSyncHostR4(session,generation){
       return await commitClientFinal(payload);
     }catch(e){
       const reason=e.message||'SYNC_FAILED',phase=prepared?'SYNC_UNCONFIRMED':'SYNC_REJECTED',failed=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase,sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason});
+      diagLog('ERROR','LAN','SESSION_FAILED',{code:reason,role:'HOST',session:session.pairing.sessionId,phase});
       await respondDirectHost(session,decode64(failed),true);return {status:'ERROR',error:reason,prepared};
     }
   }
@@ -1982,11 +2028,13 @@ async function showDirectSyncQr(){
   catch(e){setBusy(false);await showDirectDialog('QR-sünkroonimist ei saanud alustada',esc(e.message||String(e)));return;}
   finally{if(TC.busy)setBusy(false);}
   if(session.status!=='STARTED'){
+    diagLog('ERROR','LAN','SESSION_START_FAILED',{code:session.status||'START_FAILED',role:'HOST'});
     const noNetwork=session.status==='NO_LOCAL_NETWORK'||session.status==='BIND_FAILED';
     const message=noNetwork?'Kohalik võrk pole saadaval. Mõlemad telefonid peavad olema samas Wi-Fi / LAN võrgus.':session.status==='PAYLOAD_TOO_LARGE'?directSyncErrorText('PAYLOAD_TOO_LARGE'):'Ajutist ühendust ei saanud avada.';
     const actions=noNetwork||session.status==='PAYLOAD_TOO_LARGE'?[{value:'package',label:'KASUTA PAKETIGA SÜNKROONIMIST',primary:true},{value:'cancel',label:'TÜHISTA'}]:[{value:'done',label:'VALMIS',primary:true}];
     const choice=await showDirectDialog(noNetwork?'Kohalik võrk pole saadaval':'QR-sünkroonimist ei saanud alustada',esc(message),actions);if(choice==='package')await shareSyncBaseline();return;
   }
+  diagLog('INFO','LAN','PAIRING_CREATED',{role:'HOST',session:session.pairing.sessionId,lineage:String(session.pairing.lineage||'').slice(0,16),expiresAt:session.pairing.expiresAt});
   if(session.deferred){
     const generation=++directHostGeneration;let result;
     try{renderDirectHostWaitScreen(session);result=await runDirectSyncHostR4(session,generation);}
@@ -1995,8 +2043,8 @@ async function showDirectSyncQr(){
       try{if(window.Android&&typeof Android.stopLanSyncSessionFor==='function')Android.stopLanSyncSessionFor(session.pairing.sessionId);}catch(e){}
       closeDirectStatusScreen();
     }
-    if(result.bootstrap&&result.status==='COMPLETED')await showDirectDialog('ÜHENDATUD',`Baaspakett saadeti teise telefoni.<div class="topgap">Telefonis <b>${esc(session.manifest.fileName||'DOLD TechControl.xlsx')}</b> oodatakse enne salvestamist kasutaja kinnitust.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
-    else if(result.status==='COMPLETED')await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(result.prepared?.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);
+    if(result.bootstrap&&result.status==='COMPLETED'){diagLog('INFO','LAN','SESSION_COMPLETED',{role:'HOST',session:session.pairing.sessionId,mode:'BOOTSTRAP'});await showDirectDialog('ÜHENDATUD',`Baaspakett saadeti teise telefoni.<div class="topgap">Telefonis <b>${esc(session.manifest.fileName||'DOLD TechControl.xlsx')}</b> oodatakse enne salvestamist kasutaja kinnitust.</div>`,[{value:'done',label:'VALMIS',primary:true}]);}
+    else if(result.status==='COMPLETED'){diagLog('INFO','LAN','SESSION_COMPLETED',{role:'HOST',session:session.pairing.sessionId,mode:'BIDIRECTIONAL'});await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(result.prepared?.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);}
     else if(result.status==='EXPIRED')await showDirectDialog('SESSIOON AEGUS','QR-kood on aegunud. Loo uus QR.');
     else if(result.status==='ERROR')await showDirectDialog('SÜNKROONIMISE TULEMUST EI SAANUD KINNITADA','Ühenda telefonid uuesti. Telefoni kohalik töö jäi alles.');
     return;
@@ -2077,7 +2125,7 @@ function validateDirectSyncCommitAck(bytes,pairing,expected){
 }
 async function handleDirectSyncQr(raw){
   let localR4Committed=false;
-  let pairing;try{pairing=parseDirectSyncQr(raw);}catch(e){if(S.qrMode==='directSync')S.qrMode='audit';const msg=e.message==='QR_EXPIRED'?directSyncErrorText('QR_EXPIRED'):e.message==='NOT_DOLD_SYNC_QR'?'See ei ole DOLD sünkroonimise QR-kood.':'DOLD sünkroonimise QR-kood on vigane.';await showDirectDialog('QR-KOODI EI SAA KASUTADA',msg);return false;}
+  let pairing;try{pairing=parseDirectSyncQr(raw);diagLog('INFO','LAN','PAIRING_SCANNED',{session:pairing.sessionId,lineage:pairing.lineage.slice(0,16),expiresAt:pairing.expiresAt});}catch(e){diagLog('ERROR','LAN','PAIRING_REJECTED',{code:e.message||'MALFORMED_QR'});if(S.qrMode==='directSync')S.qrMode='audit';const msg=e.message==='QR_EXPIRED'?directSyncErrorText('QR_EXPIRED'):e.message==='NOT_DOLD_SYNC_QR'?'See ei ole DOLD sünkroonimise QR-kood.':'DOLD sünkroonimise QR-kood on vigane.';await showDirectDialog('QR-KOODI EI SAA KASUTADA',msg);return false;}
   try{
     const local=await findExistingDirectDatabase();
     if(local){const localLineage=await digest(new TextEncoder().encode(String(local.dbId||'')));
@@ -2104,7 +2152,7 @@ async function handleDirectSyncQr(raw){
       const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
       const ackBytes=await directClientUploadPackage(pairing,TC.dbId,clientFinalDelta,'client-final');setBusy(false);closeDirectStatusScreen();
       const ack=validateDirectSyncCommitAck(ackBytes,pairing,{dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:received.manifest.senderDeviceId,clientDeviceId:TC.deviceId,hostDeltaHash,clientDeltaHash});
-      await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(received.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);renderSyncStatus();return !!ack;
+      diagLog('INFO','LAN','SESSION_COMPLETED',{role:'CLIENT',session:pairing.sessionId,status:'COMMITTED'});await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(received.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);renderSyncStatus();return !!ack;
     }
     if(!window.Android||typeof Android.startLanSyncClient!=='function'||typeof Android.getLanSyncClientResult!=='function')throw Error('CONNECTION_FAILED');
     let localDeviceId=installationDeviceId();TC.deviceId=localDeviceId;
@@ -2116,7 +2164,7 @@ async function handleDirectSyncQr(raw){
     await processSyncPackageBytes(bytes,checked.manifest.fileName||'DOLD_Teise_telefoni_baas.dtcs',null,{directBootstrap:true,expectedLineage:pairing.lineage,localDeviceId});
     if(TC.dbId===checked.manifest.dbId)TC.deviceId=localDeviceId;
     return TC.dbId===checked.manifest.dbId;
-  }catch(e){closeDirectStatusScreen();if(TC.busy)setBusy(false);const code=e.message||'CONNECTION_FAILED';
+  }catch(e){closeDirectStatusScreen();if(TC.busy)setBusy(false);const code=e.message||'CONNECTION_FAILED';diagLog('ERROR','LAN','SESSION_FAILED',{code,role:'CLIENT',committed:localR4Committed});
     const msg=localR4Committed?'Sünkroonimise tulemust ei saanud kinnitada. Ühenda telefonid uuesti; telefoni salvestatud töö jäi alles.':code==='PACKAGE_INVALID'?'Saadud tööbaasipakett on vigane. Telefoni andmeid ei muudetud.':code==='COMMIT_UNCONFIRMED'?'Sünkroonimise tulemust ei saanud kinnitada. Ühenda telefonid uuesti; salvestatud töö jääb alles.':code==='SYNC_REJECTED'||code==='USER_CANCELLED'?'Teine telefon ei kinnitanud sünkroonimist. Kohalikku tööbaasi ei asendatud.':code==='SYNC_ABORTED'?'Sünkroonimine tühistati. Telefoni senine töö jäi alles.':directSyncErrorText(code);
     await showDirectDialog('OTSEÜHENDUS EBAÕNNESTUS',msg);return false;
   }finally{if(S.qrMode==='directSync')S.qrMode='audit';}
@@ -2175,7 +2223,7 @@ async function processSyncPackageBytes(sourceBytes,fileName='sync.dtcs',clearInp
     const opFile=archive.file(manifest.operations?.path||'operations.json');if(!opFile)throw Error('Sünkroonimispaketist puuduvad muudatused.');
     const opBytes=await opFile.async('uint8array');if(opBytes.length!==manifest.operations.size||await digest(opBytes)!==manifest.operations.sha256)throw Error('Sünkroonimispaketi kontrollsumma ei klapi.');
     const operations=JSON.parse(new TextDecoder().decode(opBytes));if(!Array.isArray(operations)||operations.length!==manifest.operations.count)throw Error('Sünkroonimispaketi muudatuste loend on vigane.');
-    const preview=previewSyncOperations(operations),sum={newControls:preview.newControls,newDefects:preview.newDefects,repairedDefects:preview.repairedDefects,updatedDefects:preview.updatedDefects,cabinetStatusChanges:preview.cabinetStatusChanges,otherChanges:preview.otherChanges};
+    const preview=previewSyncOperations(operations),sum={newControls:preview.newControls,newDefects:preview.newDefects,repairedDefects:preview.repairedDefects,updatedDefects:preview.updatedDefects,cabinetStatusChanges:preview.cabinetStatusChanges,otherChanges:preview.otherChanges};diagLog('INFO','SYNC','SEMANTIC_PREPARE',{received:operations.length,duplicates:preview.duplicates,conflicts:preview.conflicts,peer:String(manifest.senderDeviceId||'').slice(0,16),direction:options.directRole||'PACKAGE'});
     let choice='sync';
     if(options.directPrepareOnly||options.directProtocol&&!options.directApplyConfirmed){
       const direction=options.directRole||'TEISEST TELEFONIST';
@@ -2188,11 +2236,11 @@ async function processSyncPackageBytes(sourceBytes,fileName='sync.dtcs',clearInp
     }
     if(options.directPrepareOnly)return {accepted:true,manifest,operations,preview,sum};
     const conflictChoices={};if(options.directProtocol&&preview.conflictItems.length){setBusy(false);for(const conflict of preview.conflictItems){const pick=await promptSyncConflict(conflict);if(!['local','remote'].includes(pick))return {accepted:false,manifest,operations,preview,sum};conflictChoices[conflict.conflictId]=pick;}setBusy(true);}
-    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null);if(report.conflicts&&!options.directProtocol)await resolvePendingSyncConflicts(conflictChoices);
+    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null);diagLog('INFO','SYNC','APPLY',{received:operations.length,applied:report.applied,duplicates:report.duplicates,conflicts:report.conflicts,rejected:0,peer:String(manifest.senderDeviceId||'').slice(0,16),direction:options.directRole||'PACKAGE'});if(report.conflicts&&!options.directProtocol)await resolvePendingSyncConflicts(conflictChoices);
     if(options.directProtocol||options.directApplyConfirmed){renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};}
     await showAppChoice('SÜNKROONITUD',`Saadud:<br>${syncSummaryHtml(sum)}<div class="topgap">Telefoni enda muudatused säilitati.<br>Rakendatud: ${report.applied} • Juba olemas: ${report.duplicates} • Vastuolusid lahendati: ${report.conflicts}</div>`,[{value:'done',label:'JÄTKA',primary:true}]);
     renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};
-  }catch(e){if(options.directBootstrap||options.directProtocol)throw e;alert('Sünkroonimine ebaõnnestus. Telefoni senine töö jäi alles.\n'+e.message);}
+  }catch(e){diagLog('ERROR','SYNC','APPLY_FAILED',{code:e.message||'SYNC_FAILED',direction:options.directRole||'PACKAGE'});if(options.directBootstrap||options.directProtocol)throw e;alert('Sünkroonimine ebaõnnestus. Telefoni senine töö jäi alles.\n'+e.message);}
   finally{if(markedBusy)setBusy(false);clearInput?.();}
 }
 async function importSyncPackage(ev,sourceBytes=null){

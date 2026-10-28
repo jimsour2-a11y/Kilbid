@@ -2,7 +2,10 @@ package ee.dold.techcontrol;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageInfo;
@@ -51,7 +54,9 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +67,7 @@ public class MainActivity extends Activity {
     private static final int EXPORT_DOCUMENT_REQUEST = 1103;
     private WorkspaceStore workspaceStore;
     private SignatureDraftStore signatureDraftStore;
+    private DiagnosticLogStore diagnosticLogStore;
     private SignatureCaptureDialog signatureCaptureDialog;
     private LanSyncTransport lanSyncTransport;
     private boolean darkTheme = false;
@@ -92,6 +98,16 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         workspaceStore = new WorkspaceStore(getFilesDir());
         signatureDraftStore = new SignatureDraftStore(getFilesDir());
+        try {
+            diagnosticLogStore = new DiagnosticLogStore(getFilesDir());
+            Map<String,Object> startup = new LinkedHashMap<>();
+            startup.put("api", Build.VERSION.SDK_INT);
+            startup.put("manufacturer", Build.MANUFACTURER);
+            startup.put("model", Build.MODEL);
+            diagnosticLogStore.append("INFO", "APP", "STARTUP", startup);
+        } catch (Exception ignored) {
+            diagnosticLogStore = null;
+        }
         lanSyncTransport = new LanSyncTransport();
         String savedUri = getPreferences(MODE_PRIVATE).getString("importUri", null);
         if (savedUri != null) importUri = Uri.parse(savedUri);
@@ -517,8 +533,12 @@ public class MainActivity extends Activity {
                     Intent chooser = Intent.createChooser(send, "Jaga DOLD TechControli tööfaili");
                     chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                     startActivity(chooser);
+                    Map<String,Object> fields = new LinkedHashMap<>();fields.put("filename",file.getName());fields.put("mime",mime);fields.put("bytes",file.length());
+                    appendDiagnostic("INFO","SHARE","CHOOSER_OPENED",fields);
                     sendShareResult(true, "Androidi jagamismenüü avati");
                 } catch (Exception e) {
+                    Map<String,Object> fields = new LinkedHashMap<>();fields.put("code","SHARE_FAILED");fields.put("message",e.getMessage());
+                    appendDiagnostic("ERROR","SHARE","SHARE_FAILED",fields);
                     sendShareResult(false, e.getMessage());
                 }
             });
@@ -541,6 +561,110 @@ public class MainActivity extends Activity {
         String safe = name == null ? "DOLD_TechControl.xlsx" : name;
         safe = safe.replaceAll("[\\\\/:*?\"<>|]", "_");
         return safe.isEmpty() ? "DOLD_TechControl.xlsx" : safe;
+    }
+
+    private void appendDiagnostic(String level, String component, String event, Map<String, ?> fields) {
+        if (diagnosticLogStore == null) return;
+        try { diagnosticLogStore.append(level, component, event, fields); } catch (Exception ignored) {}
+    }
+
+    private Map<String,Object> diagnosticFields(JSONObject value) {
+        Map<String,Object> fields = new LinkedHashMap<>();
+        if (value == null) return fields;
+        java.util.Iterator<String> keys = value.keys();
+        while (keys.hasNext() && fields.size() < 64) {
+            String key = keys.next();
+            Object item = value.opt(key);
+            if (item instanceof String || item instanceof Number || item instanceof Boolean || item == JSONObject.NULL)
+                fields.put(key, item == JSONObject.NULL ? "" : item);
+        }
+        return fields;
+    }
+
+    private String shortDiagnosticId(String value) {
+        String safe = value == null ? "" : value.trim();
+        if (safe.length() <= 16) return safe;
+        return safe.substring(0, 8) + "…" + safe.substring(safe.length() - 4);
+    }
+
+    private String safeDiagnosticHeaderText(String value, int limit) {
+        String safe = value == null ? "" : value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ').trim();
+        return safe.length() > limit ? safe.substring(0, limit) + "…" : safe;
+    }
+
+    private String diagnosticHeader(String contextJson) throws Exception {
+        JSONObject context = contextJson == null || contextJson.isEmpty() ? new JSONObject() : new JSONObject(contextJson);
+        PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+        long versionCode = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        StringBuilder out = new StringBuilder();
+        out.append("DOLD TechControl diagnostic log\n");
+        out.append("appVersion: ").append(info.versionName).append('\n');
+        out.append("versionCode: ").append(versionCode).append('\n');
+        out.append("package: ").append(getPackageName()).append('\n');
+        out.append("android: ").append(Build.VERSION.RELEASE).append(" / API ").append(Build.VERSION.SDK_INT).append('\n');
+        out.append("device: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
+        out.append("installationId: ").append(shortDiagnosticId(context.optString("installationId", ""))).append('\n');
+        out.append("dbId: ").append(shortDiagnosticId(context.optString("dbId", ""))).append('\n');
+        out.append("epoch: ").append(shortDiagnosticId(context.optString("epoch", ""))).append('\n');
+        out.append("workbook: ").append(safeDiagnosticHeaderText(context.optString("workbookName", ""), 180)).append('\n');
+        out.append("revision: ").append(context.optLong("revision", 0)).append('\n');
+        out.append("timestamp: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.ROOT).format(new java.util.Date())).append('\n');
+        out.append("\n");
+        return out.toString();
+    }
+
+    private String diagnosticText(String contextJson) throws Exception {
+        return diagnosticHeader(contextJson) + (diagnosticLogStore == null ? "" : diagnosticLogStore.readAll());
+    }
+
+    private boolean copyDiagnosticLog(String contextJson) {
+        try {
+            appendDiagnostic("INFO", "APP", "LOG_COPY", null);
+            String text = diagnosticText(contextJson);
+            runOnUiThread(() -> {
+                ClipboardManager clipboard = (ClipboardManager)getSystemService(Context.CLIPBOARD_SERVICE);
+                clipboard.setPrimaryClip(ClipData.newPlainText("DOLD TechControl diagnostic log", text));
+                Toast.makeText(MainActivity.this, "Diagnostika kopeeritud", Toast.LENGTH_SHORT).show();
+            });
+            return true;
+        } catch (Exception e) {
+            Map<String,Object> fields = new LinkedHashMap<>();fields.put("code", "COPY_FAILED");fields.put("message", e.getMessage());
+            appendDiagnostic("ERROR", "APP", "LOG_COPY_FAILED", fields);
+            return false;
+        }
+    }
+
+    private boolean exportDiagnosticLog(String contextJson) {
+        try {
+            appendDiagnostic("INFO", "SHARE", "ACTION_SEND_START", Collections.singletonMap("filename", "DOLD_TechControl_log.txt"));
+            String text = diagnosticText(contextJson);
+            File directory = new File(getCacheDir(), "shared");
+            if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("Jagamise kausta ei saa luua");
+            File file = new File(directory, "DOLD_TechControl_log.txt");
+            try (FileOutputStream out = new FileOutputStream(file, false)) {
+                out.write(text.getBytes(StandardCharsets.UTF_8));out.flush();out.getFD().sync();
+            }
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+            runOnUiThread(() -> {
+                try {
+                    Intent send = new Intent(Intent.ACTION_SEND);
+                    send.setType("text/plain");send.putExtra(Intent.EXTRA_STREAM, uri);
+                    send.setClipData(ClipData.newUri(getContentResolver(), "DOLD TechControl diagnostic log", uri));
+                    send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Intent chooser = Intent.createChooser(send, "Jaga DOLD TechControli diagnostikat");
+                    chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);startActivity(chooser);
+                    appendDiagnostic("INFO", "SHARE", "CHOOSER_OPENED", Collections.singletonMap("filename", "DOLD_TechControl_log.txt"));
+                } catch (Exception e) {
+                    Map<String,Object> fields = new LinkedHashMap<>();fields.put("code", "EXPORT_FAILED");fields.put("message", e.getMessage());
+                    appendDiagnostic("ERROR", "SHARE", "EXPORT_FAILED", fields);
+                }
+            });
+            return true;
+        } catch (Exception e) {
+            Map<String,Object> fields = new LinkedHashMap<>();fields.put("code", "EXPORT_FAILED");fields.put("message", e.getMessage());
+            appendDiagnostic("ERROR", "SHARE", "EXPORT_FAILED", fields);
+            return false;
+        }
     }
 
     private synchronized void beginExport(String fileName, String mime) throws Exception {
@@ -696,6 +820,18 @@ public class MainActivity extends Activity {
     }
 
     public class AndroidBridge {
+        @JavascriptInterface public boolean appendDiagnosticEvent(String level,String component,String event,String fieldsJson){
+            try{JSONObject fields=fieldsJson==null||fieldsJson.isEmpty()?new JSONObject():new JSONObject(fieldsJson);appendDiagnostic(level,component,event,diagnosticFields(fields));return true;}
+            catch(Exception e){appendDiagnostic("ERROR","APP","LOG_APPEND_FAILED",Collections.singletonMap("code","LOG_APPEND_FAILED"));return false;}
+        }
+        @JavascriptInterface public String getDiagnosticLog(String contextJson){try{return diagnosticText(contextJson);}catch(Exception e){return "DOLD TechControl diagnostic log\nerror: LOG_READ_FAILED\n";}}
+        @JavascriptInterface public String getDiagnosticLogStats(){
+            try{JSONObject out=new JSONObject();out.put("count",diagnosticLogStore==null?0:diagnosticLogStore.entryCount());out.put("bytes",diagnosticLogStore==null?0:diagnosticLogStore.sizeBytes());out.put("lastEventTime",diagnosticLogStore==null?"":diagnosticLogStore.lastEventTime());return out.toString();}
+            catch(Exception e){return "{\"count\":0,\"bytes\":0,\"lastEventTime\":\"\"}";}
+        }
+        @JavascriptInterface public boolean copyDiagnosticLog(String contextJson){return MainActivity.this.copyDiagnosticLog(contextJson);}
+        @JavascriptInterface public boolean exportDiagnosticLog(String contextJson){return MainActivity.this.exportDiagnosticLog(contextJson);}
+        @JavascriptInterface public boolean clearDiagnosticLog(){try{if(diagnosticLogStore==null)return false;diagnosticLogStore.clear();return true;}catch(Exception e){return false;}}
         @JavascriptInterface public String saveWorkspace(String id,String payload){try{workspaceStore.save(id,payload);return WorkspaceStore.ok(true);}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String readWorkspace(String id){try{return WorkspaceStore.ok(workspaceStore.read(id));}catch(Exception e){return WorkspaceStore.error(e);}}
         @JavascriptInterface public String listWorkspaces(){try{return WorkspaceStore.ok(workspaceStore.list());}catch(Exception e){return WorkspaceStore.error(e);}}
@@ -735,14 +871,14 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String startLanSyncSession(String dbId,String responseBase64){
             try {
                 byte[] response=decodeLanPayload(responseBase64);
-                return lanSyncTransport.startHost(dbId,response).toJson();
-            } catch(Exception e) { return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
+                String result=lanSyncTransport.startHost(dbId,response).toJson();appendDiagnostic("INFO","LAN","SESSION_START",Collections.singletonMap("role","HOST"));return result;
+            } catch(Exception e) { appendDiagnostic("ERROR","LAN","SESSION_START_FAILED",Collections.singletonMap("code","INVALID_PAYLOAD"));return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
         }
         @JavascriptInterface public String startLanSyncSessionDeferred(String dbId,String initialResponseBase64){
             try {
                 byte[] initialResponse=decodeLanPayload(initialResponseBase64);
-                return lanSyncTransport.startHostDeferred(dbId,initialResponse).toJson();
-            } catch(Exception e) { return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
+                String result=lanSyncTransport.startHostDeferred(dbId,initialResponse).toJson();appendDiagnostic("INFO","LAN","SESSION_START",Collections.singletonMap("role","HOST"));return result;
+            } catch(Exception e) { appendDiagnostic("ERROR","LAN","SESSION_START_FAILED",Collections.singletonMap("code","INVALID_PAYLOAD"));return lanErrorJson("INVALID_PAYLOAD","LAN payload could not be prepared."); }
         }
         @JavascriptInterface public boolean respondLanSyncSession(String responseBase64,boolean terminal){
             try { return lanSyncTransport!=null&&lanSyncTransport.respondHost(decodeLanPayload(responseBase64),terminal); }
@@ -769,8 +905,9 @@ public class MainActivity extends Activity {
                         p.optLong("expiresAt",0),p.optString("lineage",""));
                 byte[] request=decodeLanPayload(requestBase64);
                 LanSyncTransport.ClientJob job=lanSyncTransport.startClient(info,expectedDbId,request);
+                Map<String,Object> fields=new LinkedHashMap<>();fields.put("role","CLIENT");fields.put("session",shortDiagnosticId(info.sessionId));appendDiagnostic("INFO","LAN","SESSION_START",fields);
                 JSONObject out=new JSONObject();out.put("ok",true);out.put("jobId",job.id);out.put("status",job.getState());return out.toString();
-            } catch(Exception e) { return lanErrorJson("MALFORMED_PAIRING","Pairing information or payload is invalid."); }
+            } catch(Exception e) { appendDiagnostic("ERROR","LAN","SESSION_START_FAILED",Collections.singletonMap("code","MALFORMED_PAIRING"));return lanErrorJson("MALFORMED_PAIRING","Pairing information or payload is invalid."); }
         }
         @JavascriptInterface public String getLanSyncClientResult(String jobId){
             try {
@@ -801,7 +938,7 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public long elapsedRealtime(){return SystemClock.elapsedRealtime();}
         @JavascriptInterface public void setTheme(boolean dark){runOnUiThread(()->{darkTheme=dark;if(!scannerActive)setLightSystemBars();});}
-        @JavascriptInterface public boolean beginShareFile(String fileName,String mime){return beginShare(fileName,mime);}
+        @JavascriptInterface public boolean beginShareFile(String fileName,String mime){Map<String,Object> fields=new LinkedHashMap<>();fields.put("filename",fileName);fields.put("mime",mime);appendDiagnostic("INFO","SHARE","ACTION_SEND_START",fields);return beginShare(fileName,mime);}
         @JavascriptInterface public boolean writeShareChunk(String base64Chunk){return appendShareChunk(base64Chunk);}
         @JavascriptInterface public boolean finishShareFile(){return finishShare();}
         @JavascriptInterface public synchronized boolean consumeQrProof(String id){

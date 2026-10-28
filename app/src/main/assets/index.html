@@ -152,6 +152,16 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
  <p class="small">Vähemalt 60 sekundit. Lühemat kontrolli lõpetada ei saa.</p>
  <label>Teema</label><select id="themeSetting" onchange="saveThemeSetting()"><option value="system">Süsteemne</option><option value="light">Hele</option><option value="dark">Tume</option></select>
  </div>
+ <div class="card" id="diagnosticCard">
+  <div class="big">Diagnostika</div>
+  <p class="small">Tehniline logi aitab rakenduse vea põhjust leida. Logi ei sisalda XLSX-i sisu ega allkirja puutepunkte.</p>
+  <div id="diagnosticStats" class="small">Logi andmeid loetakse…</div>
+  <div class="actions topgap">
+   <button onclick="copyDiagnosticLog()">KOPEERI LOGI</button>
+   <button onclick="exportDiagnosticLog()">EKSPORDI LOGI</button>
+   <button class="danger" onclick="clearDiagnosticLog()">TÜHJENDA LOGI</button>
+  </div>
+ </div>
 </section>
 <section id="homeTab" class="hidden">
  <div class="card">
@@ -610,7 +620,7 @@ function showTab(tab){
  if(tab==="cab"){$("cabTab").classList.remove("hidden");$("tabCab").classList.add("primary");renderCabinets()}
  if(tab==="def"){$("defTab").classList.remove("hidden");$("tabDef").classList.add("primary");renderDefects()}
  if(tab==="data"){$("dataTab").classList.remove("hidden");$("tabData").classList.add("primary");if(typeof refreshSignatureDrafts==='function')refreshSignatureDrafts()}
- if(tab==="settings"){$("settingsTab").classList.remove("hidden");$("tabSettings").classList.add("primary");loadMinInspectionSetting()}
+ if(tab==="settings"){$("settingsTab").classList.remove("hidden");$("tabSettings").classList.add("primary");loadMinInspectionSetting();if(typeof refreshDiagnosticPanel==='function')refreshDiagnosticPanel()}
  if(tab==="repair"){$("repairTab").classList.remove("hidden")}
  window.scrollTo(0,0);
 }

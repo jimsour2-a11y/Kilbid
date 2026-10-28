@@ -87,6 +87,7 @@ function showContext({prepare, runHost}) {
     showDirectDialog: async (title, body) => { dialogs.push({title, body}); return 'done'; },
     showAppChoice: async (title, body) => { dialogs.push({title, body}); return 'done'; },
     directSyncSummaryHtml: () => 'summary', esc: value => String(value),
+    diagLog() { return false; },
     renderSyncStatus() {}, directSyncErrorText: () => 'transport error',
     shareSyncBaseline: async () => {}, appDialogChoice() {}, console
   };
@@ -173,6 +174,7 @@ async function main() {
       showDirectDialog:async(title,body)=>{dialogs.push({title,body});return 'done';},
       showAppChoice:async(title,body)=>{dialogs.push({title,body});return 'done';},
       directSyncSummaryHtml:()=>'',esc:String,renderSyncStatus(){},directSyncErrorText:()=>'',shareSyncBaseline:async()=>{},appDialogChoice(){},
+      diagLog(){return false;},
       Android:{stopLanSyncSessionFor(id){stopIds.push(id);if(active===id)active='';return true;},stopLanSyncSession(){throw Error('broad stop');}}
     };
     cx.window=cx;vm.createContext(cx);vm.runInContext(hostFlowSource,cx);
@@ -212,6 +214,7 @@ async function main() {
     const cx = {
       S:{zip:new Uint8Array([1])}, TC:{dbId:'db-1',sync:{}}, window:null,
       DIRECT_SYNC_MAX_BYTES:1024,
+      DIRECT_SYNC_MAX_PACKAGE_BYTES:20*1024*1024,
       createSyncBaselineBytes:async()=>new Uint8Array([1,2,3]),
       supportsR4DirectSync:()=>true,
       bytesToBase64:()=> 'AA==',

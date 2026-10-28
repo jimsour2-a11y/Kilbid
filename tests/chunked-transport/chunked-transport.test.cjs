@@ -34,6 +34,7 @@ const cx={
   digest:async bytes=>crypto.createHash('sha256').update(Buffer.from(bytes)).digest('hex'),
   bytesToBase64:bytes=>Buffer.from(bytes).toString('base64'),
   decode64:value=>new Uint8Array(Buffer.from(String(value||''),'base64')),
+  diagLog:()=>false,
   directClientExchange:async()=>{throw Error('unexpected native exchange');}
 };
 vm.createContext(cx);vm.runInContext(source,cx,{filename:'chunked-transport-production.js'});

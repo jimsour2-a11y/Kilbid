@@ -600,9 +600,9 @@ await test('Recovery chunked transport keeps two-way semantic sync and retry ide
 });
 await test('R4 bidirectional semantic sync converges in one QR session and protects conflicts/idempotency',async()=>{
  const pair=await r4PhonePair('r4-integration'),{phoneA,phoneB,dirA,dirB,dbId,deviceKey}=pair;
- const controls=[],newDefects=[];let oldDefectId='',baselineKontrollRows=0,baselineDefectRows=0,baselineCycle='',baselineChecked=0;
+ const controls=[],newDefects=[];let oldDefectId='',baselineKontrollRows=0,baselineDefectRows=0,baselineCycle='',baselineChecked=0,baselineSheetPaths=[];
  await r4WithEnv(phoneA,dirA,async()=>{
-   await run('continueLastWorkingFile()');await run('continueCycle()');baselineKontrollRows=await count('Kontrollid');baselineDefectRows=await count('Puudused');baselineCycle=run('TC.cycle.id');baselineChecked=run('S.sessionChecked.size');
+   await run('continueLastWorkingFile()');await run('continueCycle()');baselineKontrollRows=await count('Kontrollid');baselineDefectRows=await count('Puudused');baselineCycle=run('TC.cycle.id');baselineChecked=run('S.sessionChecked.size');baselineSheetPaths=JSON.parse(JSON.stringify(run('Object.keys(S.paths).sort()')));
    const ids=JSON.parse(JSON.stringify(run('activeCabinets().filter(c=>!S.sessionChecked.has(c.id)).slice(0,2).map(c=>c.id)')));assert.equal(ids.length,2);controls.push(...ids);
    await saveTestInspection(ids[0],'R4 parallel defect one');await saveTestInspection(ids[1],'R4 parallel defect two');
    await openCabWithChoices(ids[0],'list',['new','create']);el('inspector').value='R4 inspector';run('setAllScores(3)');advance(61);await run('saveInspection()');
@@ -690,7 +690,7 @@ await test('R4 bidirectional semantic sync converges in one QR session and prote
  let restartedA,restartedB;for(const [dir,char] of [[dirA,'a'],[dirB,'b']]){settings.set(deviceKey,'device-'+char.repeat(32));storeDir=dir;env=makeContext();await run('TC.startupTask');await run('continueLastWorkingFile()');await run('continueCycle()');assert.equal(run(`TC.allDefects.find(d=>d.syncId===${JSON.stringify(conflictDefectId)}).desc`),'Phone B second edit');if(char==='a')restartedA=env;else restartedB=env;}
  const restartCheck=restartedA.run('TC.sync.epoch')===restartedB.run('TC.sync.epoch')&&restartedA.run(`TC.allDefects.find(d=>d.syncId===${JSON.stringify(conflictDefectId)}).desc`)===restartedB.run(`TC.allDefects.find(d=>d.syncId===${JSON.stringify(conflictDefectId)}).desc`);
  verify('restart after successful sync restores identical merged business state',restartCheck);
- verify('workbook history and sheet set survive sync export model',restartedA.run('Object.keys(S.paths).length===8')&&restartedB.run('Object.keys(S.paths).length===8'));
+ verify('workbook history and sheet set survive sync export model',JSON.stringify(restartedA.run('Object.keys(S.paths).sort()'))===JSON.stringify(baselineSheetPaths)&&JSON.stringify(restartedB.run('Object.keys(S.paths).sort()'))===JSON.stringify(baselineSheetPaths));
  verify('full handoff and file based sync entry points remain available',restartedA.run("typeof createWorkPackageBytes==='function'&&typeof createSyncDeltaBytes==='function'&&typeof importWorkPackage==='function'&&typeof processSyncPackageBytes==='function'"));
  verify('R3 baseline bootstrap path and different device ids remain present',restartedA.run("typeof importSyncBaseline==='function'&&typeof installationDeviceId==='function'")&&restartedA.run('TC.deviceId')!==restartedB.run('TC.deviceId'));
  assert.equal(r4Checks.length,46,`R4 subcase count was ${r4Checks.length}`);fs.writeFileSync(path.join(out,'r4-results.json'),JSON.stringify({passed:r4Checks.length,total:46,cases:r4Checks},null,2));console.log(`R4 BUSINESS ${r4Checks.length}/46 PASS`);
@@ -706,10 +706,10 @@ await test('R5 safety failures keep durable work recoverable across the two-exch
  async function restart(ctx,dir,deviceId){const oldEnv=env,oldDir=storeDir;settings.set(deviceKey,deviceId);storeDir=dir;env=makeContext();const fresh=env,local=new Map([[deviceKey,deviceId]]);fresh.cx.localStorage={getItem:k=>local.get(k)??null,setItem:(k,v)=>local.set(k,String(v)),removeItem:k=>local.delete(k)};await run('TC.startupTask');await run('continueLastWorkingFile()');await run('continueCycle()');env=oldEnv;storeDir=oldDir;return fresh;}
  function noSuccess(session){return !session.dialogs.some(d=>d.title==='SÜNKROONITUD');}
  function uncertain(session){return session.dialogs.some(d=>/TULEMUST EI SAANUD KINNITADA|OTSEÜHENDUS EBAÕNNESTUS/.test(d.title)||/tulemust ei saanud kinnitada/i.test(d.body));}
- async function workbookMeta(ctx){return JSON.parse(JSON.stringify(await ctx.run(`(async()=>{const names=Object.keys(S.paths).sort(),parts=Object.values(S.paths),formulas=[];for(const p of parts){const d=parseXml(await S.zip.file(p).async('string'));for(const f of qsa(d,'f'))formulas.push(f.textContent||'');}return {names,formulaCount:formulas.length,formulaHash:await digest(new TextEncoder().encode(formulas.join('|'))),fileCount:Object.keys(S.zip.files).length};})()`)));}
+ async function workbookMeta(ctx){return JSON.parse(JSON.stringify(await ctx.run(`(async()=>{const names=Object.keys(S.paths).sort(),parts=Object.values(S.paths),formulas=[],formulaMap={};for(const p of parts){const d=parseXml(await S.zip.file(p).async('string'));for(const f of qsa(d,'f')){const value=f.textContent||'',ref=f.parentNode?.getAttribute('r')||'';formulas.push(value);if(ref)formulaMap[p+'!'+ref]=value;}}return {names,formulaCount:formulas.length,formulaHash:await digest(new TextEncoder().encode(formulas.join('|'))),formulaMap,fileCount:Object.keys(S.zip.files).length};})()`)));}
  async function packageFrom(ctx,mutate,rehash=true){const bytes=await ctx.run('createSyncDeltaBytes()'),zip=await JSZip.loadAsync(bytes),manifest=JSON.parse(await zip.file('manifest.json').async('string')),ops=JSON.parse(await zip.file(manifest.operations.path||'operations.json').async('string'));mutate?.(manifest,ops);const opBytes=new TextEncoder().encode(JSON.stringify(ops));if(rehash){manifest.operations.size=opBytes.length;manifest.operations.count=ops.length;manifest.operations.sha256=crypto.createHash('sha256').update(opBytes).digest('hex');}zip.file(manifest.operations.path||'operations.json',opBytes);zip.file('manifest.json',JSON.stringify(manifest));return zip.generateAsync({type:'uint8array'});}
  async function rejectedWithoutWrite(ctx,payload,label){const before=await saved(ctx);let rejected=false;ctx.cx.incoming=new Uint8Array(payload);try{await ctx.run(`processSyncPackageBytes(incoming,${JSON.stringify(label)},null,{directProtocol:true,directPrepareOnly:true})`);}catch(e){rejected=true;}const after=await saved(ctx);return {rejected,unchanged:before.workbookHash===after.workbookHash&&before.sync.journal.length===after.sync.journal.length&&before.sync.appliedOps.length===after.sync.appliedOps.length};}
- const baselineA=await saved(phoneA),baselineB=await saved(phoneB);
+ const baselineA=await saved(phoneA),baselineB=await saved(phoneB),initialWorkbookMeta=await workbookMeta(phoneA);
  verify('R5 pair begins on one database and epoch',phoneA.run('TC.dbId')===phoneB.run('TC.dbId')&&phoneA.run('TC.sync.epoch')===phoneB.run('TC.sync.epoch'));
  verify('R5 pair keeps separate persistent device IDs',deviceA!==deviceB&&/^device-[a-f0-9]{32}$/.test(deviceA)&&/^device-[a-f0-9]{32}$/.test(deviceB));
  verify('initial durable snapshots contain checksummed workbooks',!!baselineA.workbookHash&&!!baselineB.workbookHash&&baselineA.workbookBase64.length>0&&baselineB.workbookBase64.length>0);
@@ -853,8 +853,8 @@ await test('R5 safety failures keep durable work recoverable across the two-exch
  verify('restart restores all exchanged inspections and defects',finalA.run(`TC.records.some(r=>r.syncId===${JSON.stringify(firstControl.kontrollId)})`)&&finalB.run(`TC.records.some(r=>r.syncId===${JSON.stringify(fourthControl.kontrollId)})`)&&finalA.run(`TC.allDefects.some(d=>d.syncId===${JSON.stringify(fourthControl.defectId)})`));
  verify('restart restores journal and applied operation identities',finalSnapA.sync.journal.length>0&&finalSnapB.sync.journal.length>0&&finalSnapA.sync.appliedOps.length>0&&finalSnapB.sync.appliedOps.length>0);
  verify('restart restores conflict history without unresolved duplicates',Array.isArray(finalSnapA.sync.conflicts)&&Array.isArray(finalSnapB.sync.conflicts));
- verify('restart preserves the eight-sheet workbook model and archive parts',metaA.names.length===8&&JSON.stringify(metaA.names)===JSON.stringify(metaB.names)&&metaA.fileCount===metaB.fileCount);
- verify('restart preserves formula count and formula content hash',metaA.formulaCount>0&&metaA.formulaCount===metaB.formulaCount&&metaA.formulaHash===metaB.formulaHash);
+ verify('restart preserves the workbook sheet model and archive parts',JSON.stringify(metaA.names)===JSON.stringify(initialWorkbookMeta.names)&&JSON.stringify(metaB.names)===JSON.stringify(initialWorkbookMeta.names)&&metaA.fileCount===metaB.fileCount);
+ const originalFormulaEntries=Object.entries(initialWorkbookMeta.formulaMap);verify('restart preserves every original formula at its OOXML part and cell',originalFormulaEntries.length>0&&originalFormulaEntries.every(([cell,formula])=>metaA.formulaMap[cell]===formula&&metaB.formulaMap[cell]===formula),JSON.stringify({initial:initialWorkbookMeta.formulaCount,a:metaA.formulaCount,b:metaB.formulaCount}));
  verify('restart leaves every applied operation ID unique',new Set(finalSnapA.sync.appliedOps).size===finalSnapA.sync.appliedOps.length&&new Set(finalSnapB.sync.appliedOps).size===finalSnapB.sync.appliedOps.length);
  verify('old file sync and full work handoff remain available',finalA.run("typeof processSyncPackageBytes==='function'&&typeof importWorkPackage==='function'&&typeof createWorkPackageBytes==='function'"));
  verify('R3 bootstrap/import path remains intact after R5 hardening',finalA.run("typeof validateDirectBaselineBytes==='function'&&typeof importSyncBaseline==='function'"));
@@ -1061,7 +1061,7 @@ await test('S1.5 production target and effective-status formulas require unique 
 });
 await test('S1 signature draft list remains local-only and does not invoke workbook writes',async()=>{
  const before=run('TC.revision'),rows=run('TC.records.length');run('refreshSignatureDrafts()');
- assert(el('signatureDraftList').innerHTML.includes('Salvestatud allkirja mustandeid pole'));
+ assert(el('signatureDraftList').innerHTML.includes('Sobivaid allkirju ega mustandeid pole'));
  assert.equal(run('TC.revision'),before);assert.equal(run('TC.records.length'),rows);assert.equal(env.signatureStartCalls.length,0);
 });
 function s2Jcs(value){
@@ -1205,9 +1205,9 @@ await test('S2 signature anti-reuse blocks same known strokes and preserves XLSX
 await test('S2 signature transaction rolls back workbook changes when durable workspace save fails',async()=>{
  const previous={env,storeDir,clock:{...clock}};try{
   await freshWorkspace('s2-save-rollback',s2TestWorkbook());await run('continueCycle()');const record=s2FreshPersistentRecord(),draft=await s2RegisterDraft(await s2MakeDraft(record));
-  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));env.setInjectFailure(true);
+  const before=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})')),beforeSignatureCount=await count('Allkirjad');env.setInjectFailure(true);
   try{const result=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(result.ok,false);}finally{env.setInjectFailure(false);}
-  const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after));assert.equal(await count('Allkirjad'),2);assert.equal(env.signatureDraftPayloads.has(draft.signatureId),true);assert(alerts.some(x=>x.includes('Kontroll jäi salvestatuks')));
+  const after=Buffer.from(await run('S.zip.generateAsync({type:"uint8array"})'));assert.equal(hashBytes(before),hashBytes(after));assert.equal(await count('Allkirjad'),beforeSignatureCount);assert.equal(env.signatureDraftPayloads.has(draft.signatureId),true);assert(alerts.some(x=>x.includes('Kontroll jäi salvestatuks')));
  }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
 });
 await test('S2 signature refuses unsupported signature workbook without modifying its active XLSX',async()=>{

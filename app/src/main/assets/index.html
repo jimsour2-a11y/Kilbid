@@ -52,8 +52,9 @@ textarea{min-height:88px;resize:vertical} .row{display:flex;gap:8px;align-items:
 .manualQr{display:grid;grid-template-columns:1fr auto;gap:8px}.manualQr input{min-width:0}
 .qrActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}.qrActions button{padding:14px 10px;font-weight:700}
 .syncPhoneActions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.syncPhoneActions button{font-weight:750}.syncQrImage{display:block;width:min(74vw,380px);height:auto;margin:12px auto;padding:12px;background:#fff;border:1px solid #d1d5db;border-radius:12px;image-rendering:pixelated}.syncQrWait{text-align:center}.syncQrWait .small{margin-top:8px}
+.signatureSummary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}.signatureSummary .card{margin:0;padding:10px;min-width:0}.signatureSummary b{display:block;font-size:20px}.signatureFilters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.signatureCard{cursor:default}.signatureCard,.signatureCard *{overflow-wrap:anywhere;word-break:break-word}.signatureListActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 
-.searchWrap{position:relative}.suggestBox{position:absolute;left:0;right:0;top:100%;z-index:35;background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:0 8px 24px rgba(0,0,0,.14);max-height:340px;overflow:auto;margin-top:4px}.suggestItem{padding:10px 12px;border-bottom:1px solid #eef0f2;cursor:pointer}.suggestItem:last-child{border-bottom:0}.suggestItem:active{background:#eef5fc}.suggestTitle{font-weight:750}.modegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.modebtn{padding:20px 14px;text-align:left;min-height:130px}.modebtn .big{font-size:20px}.modebtn.primary .small{color:#e8f2ff}.modebtn.secondary{background:#fff}.modeicon{font-size:27px;margin-bottom:8px}.inactiveCard{opacity:.78}.statusrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.timerpill{display:inline-block;padding:5px 9px;border-radius:999px;background:#eef1f5;font-size:12px;font-weight:700}.filtergrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.repairActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.repairActions button{font-weight:700}.homeperson{max-width:520px}.modehint{margin-top:6px}.dangerbox{border-color:#efc1bc;background:#fff8f7}@media(max-width:620px){.modegrid,.filtergrid{grid-template-columns:1fr}.modebtn{min-height:112px}}
+.searchWrap{position:relative}.suggestBox{position:absolute;left:0;right:0;top:100%;z-index:35;background:#fff;border:1px solid var(--line);border-radius:11px;box-shadow:0 8px 24px rgba(0,0,0,.14);max-height:340px;overflow:auto;margin-top:4px}.suggestItem{padding:10px 12px;border-bottom:1px solid #eef0f2;cursor:pointer}.suggestItem:last-child{border-bottom:0}.suggestItem:active{background:#eef5fc}.suggestTitle{font-weight:750}.modegrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.modebtn{padding:20px 14px;text-align:left;min-height:130px}.modebtn .big{font-size:20px}.modebtn.primary .small{color:#e8f2ff}.modebtn.secondary{background:#fff}.modeicon{font-size:27px;margin-bottom:8px}.inactiveCard{opacity:.78}.statusrow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.timerpill{display:inline-block;padding:5px 9px;border-radius:999px;background:#eef1f5;font-size:12px;font-weight:700}.filtergrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.repairActions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.repairActions button{font-weight:700}.homeperson{max-width:520px}.modehint{margin-top:6px}.dangerbox{border-color:#efc1bc;background:#fff8f7}@media(max-width:620px){.modegrid,.filtergrid,.signatureFilters{grid-template-columns:1fr}.signatureSummary{grid-template-columns:repeat(2,minmax(0,1fr))}.modebtn{min-height:112px}}
 
 :root[data-theme="dark"]{--bg:#10151d;--card:#1c2531;--text:#e8eef6;--muted:#b0bdce;--line:#435064;--ok:#a2e4b8;--bad:#ffaaa2;--warn:#ffd27c;--accent:#2777c5;color-scheme:dark}
 header,button,select,input,textarea,.legenditem,.suggestBox,.qrpanel,.modebtn.secondary{background:var(--card);color:var(--text)}
@@ -79,6 +80,7 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
   <button id="tabHome" onclick="showTab('home')">Avaleht</button>
   <button id="tabCab" onclick="showTab('cab')">Kilbid</button>
   <button id="tabDef" onclick="showTab('def')">Puudused <span id="defCount"></span></button>
+  <button id="tabSignature" onclick="showTab('signature')">Allkirjad</button>
   <button id="tabSettings" onclick="showTab('settings')">Seaded</button>
    <button id="tabData" onclick="showTab('data')">Andmed</button>
  </nav>
@@ -136,13 +138,23 @@ body.saving main,body.saving nav{pointer-events:none;opacity:.6}#cyclePanel butt
   <button id="syncReceiveBtn" disabled onclick="receiveSyncPackage()">VÕTA MUUDATUSTE PAKETT VASTU</button>
   <p class="small">ANNA TÖÖ ÜLE ja VÕTA TÖÖ VASTU jäävad eraldi ühe telefoni töö üleandmiseks.</p>
  </div>
- <div class="card" id="signatureDraftCard">
-  <div class="big">ALLKIRJAD JA MUSTANDID</div>
-  <p class="small">Mustand säilib telefoni privaatses salvestuses. Kontrolli allkirja kinnitamisel lisatakse allkirja kirje, tõendus ja pilt aktiivsesse XLSX-i. Allkirjad ei sünkrooni automaatselt teise telefoni.</p>
-  <button onclick="refreshSignatureDrafts()">VÄRSKENDA LOENDIT</button>
-  <div id="signatureDraftList" class="topgap small">Mustandeid pole veel loetud.</div>
- </div>
+</section>
 
+<section id="signatureTab" class="hidden">
+ <div class="card">
+  <div class="space"><div><div class="big">ALLKIRJAD JA MUSTANDID</div><p class="small">Kohalikud Kontrolli ja Paranduse allkirjad. Allkirjad ei sünkrooni automaatselt teise telefoni.</p></div><button onclick="refreshSignatureDrafts()">VÄRSKENDA LOENDIT</button></div>
+  <div id="signatureDraftSummary" class="signatureSummary" aria-live="polite"></div>
+ </div>
+ <div class="card">
+  <div class="signatureFilters">
+   <div><label for="signatureTargetFilter">Tüüp</label><select id="signatureTargetFilter" onchange="applySignatureDraftFilters()"><option value="">Kõik</option><option value="Kontroll">Kontroll</option><option value="Parandus">Parandus</option></select></div>
+   <div><label for="signatureStatusFilter">Staatus</label><select id="signatureStatusFilter" onchange="applySignatureDraftFilters()"><option value="">Kõik</option><option value="Kehtiv">Kehtiv</option><option value="Tööfailis lisamata">Tööfailis lisamata</option><option value="Tühistatud">Tühistatud</option></select></div>
+   <div><label for="signatureSearch">Otsi</label><input id="signatureSearch" type="search" placeholder="EK, KontrollID, ParandusID, AllkiriID või nimi" oninput="applySignatureDraftFilters()"></div>
+   <div><label for="signatureSort">Järjestus</label><select id="signatureSort" onchange="applySignatureDraftFilters()"><option value="newest">Uuemad enne</option><option value="oldest">Vanemad enne</option></select></div>
+  </div>
+ </div>
+ <div id="signatureDraftList" class="small">Mustandeid pole veel loetud.</div>
+ <div class="signatureListActions"><button id="signatureLoadMore" class="hidden" onclick="showMoreSignatureDrafts()">NÄITA ROHKEM</button></div>
 </section>
 
 <section id="settingsTab" class="hidden">
@@ -614,12 +626,13 @@ function pickPerson(selectId,inputId){
 
 function showTab(tab){
  stopInspectionTimer();
- for(const id of ["homeTab","cabTab","defTab","dataTab","inspectTab","repairTab","settingsTab"]) $(id).classList.add("hidden");
- for(const id of ["tabHome","tabCab","tabDef","tabData","tabSettings"]) $(id).classList.remove("primary");
+ for(const id of ["homeTab","cabTab","defTab","dataTab","signatureTab","inspectTab","repairTab","settingsTab"]) $(id).classList.add("hidden");
+ for(const id of ["tabHome","tabCab","tabDef","tabData","tabSignature","tabSettings"]) $(id).classList.remove("primary");
  if(tab==="home"){$("homeTab").classList.remove("hidden");$("tabHome").classList.add("primary");renderHome()}
  if(tab==="cab"){$("cabTab").classList.remove("hidden");$("tabCab").classList.add("primary");renderCabinets()}
  if(tab==="def"){$("defTab").classList.remove("hidden");$("tabDef").classList.add("primary");renderDefects()}
- if(tab==="data"){$("dataTab").classList.remove("hidden");$("tabData").classList.add("primary");if(typeof refreshSignatureDrafts==='function')refreshSignatureDrafts()}
+ if(tab==="data"){$("dataTab").classList.remove("hidden");$("tabData").classList.add("primary")}
+ if(tab==="signature"){$("signatureTab").classList.remove("hidden");$("tabSignature").classList.add("primary");if(typeof diagLog==='function')diagLog('INFO','UI','ALLKIRJAD_TAB_OPEN',{});if(typeof refreshSignatureDrafts==='function')refreshSignatureDrafts()}
  if(tab==="settings"){$("settingsTab").classList.remove("hidden");$("tabSettings").classList.add("primary");loadMinInspectionSetting();if(typeof refreshDiagnosticPanel==='function')refreshDiagnosticPanel()}
  if(tab==="repair"){$("repairTab").classList.remove("hidden")}
  window.scrollTo(0,0);

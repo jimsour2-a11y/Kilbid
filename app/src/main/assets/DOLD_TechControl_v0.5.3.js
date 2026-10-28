@@ -1496,18 +1496,55 @@ async function signatureDraftWorkbookStatus(draft){
     return {label:'Tööfaili kirje vajab kontrolli',saved:false,retryable:false};
   }catch(e){return {label:'Tööfaili olekut ei saanud kontrollida',saved:false,retryable:false};}
 }
+const SIGNATURE_DRAFT_BATCH_SIZE=50;
+let signatureDraftEntries=[],signatureDraftVisible=SIGNATURE_DRAFT_BATCH_SIZE;
+function signatureDraftUiStatus(label){
+  const value=String(label||'');
+  if(value.startsWith('Kehtiv'))return 'Kehtiv';
+  if(value==='XLSX-i lisamata'||value==='Tööfailis lisamata')return 'Tööfailis lisamata';
+  if(value==='Tühistatud')return 'Tühistatud';
+  return value||'Muu';
+}
+function signatureDraftFiltered(entries,filters={}){
+  const query=String(filters.query||'').trim().toLocaleLowerCase('et');
+  return entries.filter(entry=>{
+    const d=entry.draft||entry,state=entry.state||{};
+    if(filters.targetType&&d.targetType!==filters.targetType)return false;
+    if(filters.status&&signatureDraftUiStatus(state.label)!==filters.status)return false;
+    if(query&&!String([d.kilpId,d.recordId,d.signatureId,d.signerName].filter(Boolean).join(' ')).toLocaleLowerCase('et').includes(query))return false;
+    return true;
+  }).sort((a,b)=>{
+    const av=Number((a.draft||a).captureEndedAtUtcMs)||0,bv=Number((b.draft||b).captureEndedAtUtcMs)||0;
+    return filters.sort==='oldest'?av-bv:bv-av;
+  });
+}
+function renderSignatureDraftSummary(){
+  const host=$('signatureDraftSummary');if(!host)return;
+  const counts={total:signatureDraftEntries.length,valid:0,pending:0,revoked:0};
+  for(const entry of signatureDraftEntries){const status=signatureDraftUiStatus(entry.state?.label);if(status==='Kehtiv')counts.valid++;else if(status==='Tööfailis lisamata')counts.pending++;else if(status==='Tühistatud')counts.revoked++;}
+  host.innerHTML=`<div class="card"><b>${counts.total}</b><span class="small">Kokku</span></div><div class="card"><b>${counts.valid}</b><span class="small">Kehtiv</span></div><div class="card"><b>${counts.pending}</b><span class="small">Tööfailis lisamata</span></div><div class="card"><b>${counts.revoked}</b><span class="small">Tühistatud</span></div>`;
+}
+function renderSignatureDrafts(){
+  const host=$('signatureDraftList'),more=$('signatureLoadMore');if(!host)return;
+  const filtered=signatureDraftFiltered(signatureDraftEntries,{targetType:$('signatureTargetFilter')?.value||'',status:$('signatureStatusFilter')?.value||'',query:$('signatureSearch')?.value||'',sort:$('signatureSort')?.value||'newest'});
+  if(!filtered.length){host.innerHTML='<div class="card small">Sobivaid allkirju ega mustandeid pole.</div>';if(more)more.classList.add('hidden');return;}
+  host.innerHTML=filtered.slice(0,signatureDraftVisible).map(entry=>{
+    const d=entry.draft,state=entry.state,status=signatureDraftUiStatus(state.label),badge=status==='Kehtiv'?'ok':status==='Tühistatud'?'bad':'warn';
+    const retry=['Kontroll','Parandus'].includes(d.targetType)&&state.retryable?`<button class="topgap" onclick="retryProductionSignature('${esc(d.signatureId)}')">KINNITA XLSX-I</button>`:'';
+    return `<div class="card signatureCard"><div class="space"><b>${esc(d.targetType)} • ${esc(d.kilpId||'—')}</b><span class="badge ${badge}">${esc(status)}</span></div><div>${esc(d.signerName||'—')} • ${esc(localDateTime(d.captureEndedAtUtcMs))}</div><div class="small">TargetID: ${esc(d.recordId||'—')}<br>AllkiriID: ${esc(d.signatureId||'—')}<br>XLSX: ${esc(state.label)} • korduskontroll: ${esc(d.antiReuse?.result||'NOT_CHECKED')} (${esc(d.antiReuse?.scope||'LOCAL_KNOWN_DATA')})</div>${retry}</div>`;
+  }).join('');
+  if(more)more.classList.toggle('hidden',signatureDraftVisible>=filtered.length);
+}
+function applySignatureDraftFilters(){signatureDraftVisible=SIGNATURE_DRAFT_BATCH_SIZE;renderSignatureDrafts();}
+function showMoreSignatureDrafts(){signatureDraftVisible+=SIGNATURE_DRAFT_BATCH_SIZE;renderSignatureDrafts();}
 async function refreshSignatureDrafts(){
   const host=$('signatureDraftList');if(!host)return;
-  if(!window.Android||typeof Android.listSignatureDrafts!=='function'){host.innerHTML='<div class="small">Allkirja mustandid on Androidi lokaalses salvestuses.</div>';return;}
+  if(!window.Android||typeof Android.listSignatureDrafts!=='function'){host.innerHTML='<div class="card small">Allkirja mustandid on Androidi lokaalses salvestuses.</div>';return;}
   try{
     const result=JSON.parse(Android.listSignatureDrafts());if(!result.ok)throw Error(result.error||'Mustandeid ei saanud lugeda');
-    const drafts=Array.isArray(result.data)?result.data:[];
-    if(!drafts.length){host.innerHTML='<div class="small">Salvestatud allkirja mustandeid pole.</div>';return;}
-    const cards=[];for(const d of drafts.slice().reverse()){
-      const state=await signatureDraftWorkbookStatus(d),retry=['Kontroll','Parandus'].includes(d.targetType)&&state.retryable?`<button class="topgap" onclick="retryProductionSignature('${esc(d.signatureId)}')">KINNITA XLSX-I</button>`:'';
-      cards.push(`<div class="miniDef"><b>${esc(d.targetType)} • ${esc(d.kilpId)} • MUSTAND</b><div>${esc(d.signerName)} • ${esc(localDateTime(d.captureEndedAtUtcMs))}</div><div class="small">${esc(d.recordId)} • XLSX: ${esc(state.label)} • korduskontroll: ${esc(d.antiReuse?.result||'NOT_CHECKED')} (${esc(d.antiReuse?.scope||'LOCAL_KNOWN_DATA')})</div>${retry}</div>`);
-    }
-    host.innerHTML=cards.join('');
+    const drafts=Array.isArray(result.data)?result.data:[],entries=[];
+    for(const draft of drafts)entries.push({draft,state:await signatureDraftWorkbookStatus(draft)});
+    signatureDraftEntries=entries;signatureDraftVisible=SIGNATURE_DRAFT_BATCH_SIZE;renderSignatureDraftSummary();renderSignatureDrafts();
   }catch(e){host.innerHTML=`<div class="badge warn">${esc(e.message||'Allkirja mustandeid ei saanud lugeda.')}</div>`;}
 }
 async function openCab(id,source='list',duplicateAction='prompt'){
@@ -1534,7 +1571,7 @@ async function openCab(id,source='list',duplicateAction='prompt'){
   $('inspectTitle').innerHTML=`<div class="big">${esc(id)} • ${esc(cabinetTitle(S.selected))}</div><div class="small">${esc(S.selected.panel)} • ${esc(S.selected.location)}<br>${esc(S.selected.area)} • ${esc(S.selected.status)}</div>${existing?'<div class="badge warn topgap">MUUDA KONTROLLI</div>':''}${!isActiveCabinet(S.selected)?'<div class="badge warn">Ei kuulu aktiivsesse kontrolli</div>':''}`;
   $('inspectionDate').value=existing?.date||localDateIso();$('inspector').value=existing?.inspector||S.inspector||S.selected.lastInspector||'';$('inspectorQuick').value=S.people.includes($('inspector').value)?$('inspector').value:'';
   $('cabStatus').innerHTML=statusOptions(S.selected.status);$('inspectComment').value=entry?.note||'';renderRatings();renderStagedDefects();
-  for(const name of ['home','cab','def','data','repair','settings'])$(name+'Tab').classList.add('hidden');$('inspectTab').classList.remove('hidden');
+  for(const name of ['home','cab','def','data','signature','repair','settings'])$(name+'Tab').classList.add('hidden');$('inspectTab').classList.remove('hidden');
   const buttons=document.querySelectorAll('#inspectTab .stickySave button');buttons[0].textContent=existing?'SALVESTA MUUDATUSED':'SALVESTA';buttons[1].textContent=existing?'SALVESTA MUUDATUSED + JÄRGMINE':'SALVESTA + JÄRGMINE';
   renderPresence();startInspectionTimer();window.scrollTo(0,0);
 }

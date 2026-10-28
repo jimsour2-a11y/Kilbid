@@ -103,6 +103,25 @@ public final class LanSyncR4SessionTest {
             } catch (Exception e) { throw new RuntimeException(e); }
         });
 
+        test("chunk transport keeps one authenticated deferred session across multiple frames", () -> {
+            try (LanSyncTransport host = transport(); LanSyncTransport client = transport()) {
+                LanSyncTransport.StartResult started = host.startHostDeferredForTest("db-r4-chunks", bytes(""), 20_000L);
+                check("STARTED".equals(started.status), "chunk host did not start");
+                for (int index = 0; index < 6; index++) {
+                    byte[] request = bytes("chunk-request-" + index);
+                    byte[] response = bytes("chunk-response-" + index);
+                    LanSyncTransport.ClientJob job = client.startClient(started.pairing, "db-r4-chunks", request);
+                    LanSyncTransport.HostStatus event = awaitHost(host, index == 0 ? "REQUEST_RECEIVED" : "ACK_RECEIVED");
+                    check(Arrays.equals(request, event.receivedPayload), "chunk request changed at " + index);
+                    check(host.respondHost(response, index == 5), "chunk response rejected at " + index);
+                    LanSyncTransport.ClientResult result = awaitClient(client, job);
+                    check(result.isSuccess() && Arrays.equals(response, result.payload), "chunk response changed at " + index);
+                    if (index < 5) awaitHost(host, "WAITING_ACK");
+                }
+                check("COMPLETED".equals(awaitHost(host, "COMPLETED").status), "multi-frame session did not terminate");
+            } catch (Exception e) { throw new RuntimeException(e); }
+        });
+
         if (failed != 0) throw new AssertionError("R4 native tests: " + passed + "/" + (passed + failed) + " passed");
         System.out.println("R4_NATIVE " + passed + "/" + passed + " PASS");
     }

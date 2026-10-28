@@ -9,8 +9,8 @@ const TC = {schema:1, dbId:null, registryKey:'', registryTokens:[], cycle:null,
   startupLoaded:false, activated:false, startupTask:null, startupError:''};
 const META_NAME='DOLD.TechControl.v1';
 const WORK_PACKAGE_FORMAT='DOLD-TECHCONTROL-WORK-PACKAGE';
-const WORK_PACKAGE_MIME='application/vnd.dold.techcontrol.workpackage';
-const SYNC_PACKAGE_MIME='application/vnd.dold.techcontrol.syncpackage';
+const WORK_PACKAGE_MIME='application/zip';
+const SYNC_PACKAGE_MIME='application/zip';
 const APP_VERSION='0.5.6.1';
 const cloneData=v=>JSON.parse(JSON.stringify(v));
 function persistentSyncId(type,value){
@@ -1730,7 +1730,67 @@ const DIRECT_SYNC_QR_PREFIX='DOLD-DIRECT-SYNC/1:';
 const DIRECT_SYNC_BOOTSTRAP_FORMAT='DOLD-TECHCONTROL-DIRECT-BOOTSTRAP';
 const DIRECT_SYNC_COMMIT_FORMAT='DOLD-TECHCONTROL-DIRECT-SYNC-COMMIT';
 const DIRECT_SYNC_MAX_BYTES=1024*1024;
+const DIRECT_SYNC_MAX_PACKAGE_BYTES=20*1024*1024;
+const DIRECT_SYNC_CHUNK_BYTES=256*1024;
+const DIRECT_SYNC_CHUNK_FORMAT='DOLD-TECHCONTROL-DIRECT-CHUNK';
+const DIRECT_SYNC_CHUNK_PHASES=new Set(['bootstrap','client-initial','host-delta','client-final']);
 let directHostGeneration=0;
+function directChunkControl(value){
+  const bytes=new TextEncoder().encode(JSON.stringify(value));if(bytes.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');return bytes;
+}
+function directChunkMessage(bytes){
+  let value;try{value=JSON.parse(new TextDecoder().decode(bytes instanceof Uint8Array?bytes:new Uint8Array(bytes||[])));}catch(e){return null;}
+  if(value?.format!==DIRECT_SYNC_CHUNK_FORMAT)return null;
+  if(value.version!==1||!['PACKAGE_META','CHUNK_REQUEST','CHUNK_DATA'].includes(value.type)
+    ||typeof value.transferId!=='string'||!/^dtc-transfer-[a-f0-9]{32}$/.test(value.transferId)
+    ||!DIRECT_SYNC_CHUNK_PHASES.has(value.phase)||typeof value.sessionId!=='string'||typeof value.lineage!=='string')throw Error('CHUNK_PROTOCOL_INVALID');
+  return value;
+}
+function validateDirectChunkBinding(value,pairing){
+  if(!value||value.sessionId!==pairing.sessionId||value.lineage!==pairing.lineage)throw Error('CHUNK_SESSION_MISMATCH');
+}
+function validateDirectPackageMeta(meta,pairing,expectedPhase=''){
+  validateDirectChunkBinding(meta,pairing);
+  if(meta.type!=='PACKAGE_META'||(expectedPhase&&meta.phase!==expectedPhase)||meta.packageType!=='dtcs'
+    ||!Number.isInteger(meta.totalBytes)||meta.totalBytes<1||meta.totalBytes>DIRECT_SYNC_MAX_PACKAGE_BYTES
+    ||!Number.isInteger(meta.chunkSize)||meta.chunkSize<1||meta.chunkSize>DIRECT_SYNC_CHUNK_BYTES
+    ||!Number.isInteger(meta.chunkCount)||meta.chunkCount!==Math.ceil(meta.totalBytes/meta.chunkSize)
+    ||meta.chunkCount<1||meta.chunkCount>Math.ceil(DIRECT_SYNC_MAX_PACKAGE_BYTES/meta.chunkSize)
+    ||typeof meta.packageSha256!=='string'||!/^[a-f0-9]{64}$/.test(meta.packageSha256))throw Error('CHUNK_META_INVALID');
+  return meta;
+}
+async function createDirectPackageTransfer(bytes,phase,pairing){
+  if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);
+  if(!DIRECT_SYNC_CHUNK_PHASES.has(phase)||!bytes.length||bytes.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
+  const meta={format:DIRECT_SYNC_CHUNK_FORMAT,version:1,type:'PACKAGE_META',transferId:'dtc-transfer-'+uid(),phase,packageType:'dtcs',totalBytes:bytes.length,packageSha256:await digest(bytes),chunkSize:DIRECT_SYNC_CHUNK_BYTES,chunkCount:Math.ceil(bytes.length/DIRECT_SYNC_CHUNK_BYTES),sessionId:pairing.sessionId,lineage:pairing.lineage};
+  return {meta,bytes};
+}
+function directChunkRequest(meta,index){
+  if(!Number.isInteger(index)||index<0||index>=meta.chunkCount)throw Error('CHUNK_INDEX_INVALID');
+  return directChunkControl({format:DIRECT_SYNC_CHUNK_FORMAT,version:1,type:'CHUNK_REQUEST',transferId:meta.transferId,phase:meta.phase,chunkIndex:index,chunkCount:meta.chunkCount,sessionId:meta.sessionId,lineage:meta.lineage});
+}
+function directChunkData(transfer,index){
+  const {meta,bytes}=transfer;if(!Number.isInteger(index)||index<0||index>=meta.chunkCount)throw Error('CHUNK_INDEX_INVALID');
+  const start=index*meta.chunkSize,end=Math.min(bytes.length,start+meta.chunkSize),chunk=bytes.slice(start,end);
+  return directChunkControl({format:DIRECT_SYNC_CHUNK_FORMAT,version:1,type:'CHUNK_DATA',transferId:meta.transferId,phase:meta.phase,chunkIndex:index,chunkCount:meta.chunkCount,totalBytes:meta.totalBytes,packageSha256:meta.packageSha256,data:bytesToBase64(chunk),sessionId:meta.sessionId,lineage:meta.lineage});
+}
+function createDirectChunkAssembler(meta,pairing,expectedPhase=''){
+  validateDirectPackageMeta(meta,pairing,expectedPhase);return {meta,chunks:new Map(),receivedBytes:0};
+}
+function directNextMissingChunk(assembler){for(let i=0;i<assembler.meta.chunkCount;i++)if(!assembler.chunks.has(i))return i;return -1;}
+function directChunkFieldsMatch(meta,message){return message.transferId===meta.transferId&&message.phase===meta.phase&&message.chunkCount===meta.chunkCount&&message.totalBytes===meta.totalBytes&&message.packageSha256===meta.packageSha256&&message.sessionId===meta.sessionId&&message.lineage===meta.lineage;}
+function addDirectChunk(assembler,message){
+  const meta=assembler.meta;if(!message||message.type!=='CHUNK_DATA'||!directChunkFieldsMatch(meta,message)||!Number.isInteger(message.chunkIndex)||message.chunkIndex<0||message.chunkIndex>=meta.chunkCount||typeof message.data!=='string')throw Error('CHUNK_DATA_INVALID');
+  const chunk=decode64(message.data),expected=message.chunkIndex===meta.chunkCount-1?meta.totalBytes-meta.chunkSize*(meta.chunkCount-1):meta.chunkSize;
+  if(chunk.length!==expected)throw Error('CHUNK_SIZE_MISMATCH');
+  const prior=assembler.chunks.get(message.chunkIndex);if(prior){if(prior.length!==chunk.length||prior.some((value,index)=>value!==chunk[index]))throw Error('CHUNK_DUPLICATE_MISMATCH');return {duplicate:true,complete:directNextMissingChunk(assembler)<0,nextIndex:directNextMissingChunk(assembler)};}
+  assembler.chunks.set(message.chunkIndex,chunk);assembler.receivedBytes+=chunk.length;const nextIndex=directNextMissingChunk(assembler);return {duplicate:false,complete:nextIndex<0,nextIndex};
+}
+async function assembleDirectChunks(assembler){
+  const meta=assembler.meta,next=directNextMissingChunk(assembler);if(next>=0)throw Error('CHUNK_MISSING');if(assembler.receivedBytes!==meta.totalBytes)throw Error('CHUNK_TOTAL_SIZE_MISMATCH');
+  const bytes=new Uint8Array(meta.totalBytes);let offset=0;for(let i=0;i<meta.chunkCount;i++){const chunk=assembler.chunks.get(i);if(!chunk)throw Error('CHUNK_MISSING');bytes.set(chunk,offset);offset+=chunk.length;}
+  if(offset!==meta.totalBytes||await digest(bytes)!==meta.packageSha256)throw Error('CHUNK_SHA_MISMATCH');return bytes;
+}
 function supportsR4DirectSync(){return !!(window.Android&&typeof Android.startLanSyncSessionDeferred==='function'&&typeof Android.respondLanSyncSession==='function');}
 function directPairingPayload(pairing){
   const info={protocol:Number(pairing?.protocol),host:String(pairing?.host||''),port:Number(pairing?.port),sessionId:String(pairing?.sessionId||''),token:String(pairing?.token||''),createdAt:Number(pairing?.createdAt),expiresAt:Number(pairing?.expiresAt),lineage:String(pairing?.lineage||'')};
@@ -1782,15 +1842,16 @@ function startDirectSyncScanner(){
 async function prepareDirectSyncSession(){
   if(!S.zip||!TC.dbId||!TC.sync)throw Error('Ava enne QR-sünkroonimist tööfail.');
   if(!window.Android||typeof Android.startLanSyncSession!=='function'||typeof Android.createLanSyncQrPngBase64!=='function')throw Error('Selles APK-s puudub otseühenduse tugi.');
-  const baseline=await createSyncBaselineBytes();if(baseline.length>DIRECT_SYNC_MAX_BYTES)return {status:'PAYLOAD_TOO_LARGE'};
-  const deferred=supportsR4DirectSync(),started=JSON.parse(deferred?Android.startLanSyncSessionDeferred(TC.dbId,bytesToBase64(baseline)):Android.startLanSyncSession(TC.dbId,bytesToBase64(baseline)));
+  const baseline=await createSyncBaselineBytes();if(baseline.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)return {status:'PAYLOAD_TOO_LARGE'};
+  const deferred=supportsR4DirectSync();if(!deferred&&baseline.length>DIRECT_SYNC_MAX_BYTES)return {status:'PAYLOAD_TOO_LARGE'};
+  const initialResponse=baseline.length<=DIRECT_SYNC_MAX_BYTES?baseline:new Uint8Array(0),started=JSON.parse(deferred?Android.startLanSyncSessionDeferred(TC.dbId,bytesToBase64(initialResponse)):Android.startLanSyncSession(TC.dbId,bytesToBase64(initialResponse)));
   if(!started.ok||started.status!=='STARTED')return {status:started.status||'ERROR',message:started.message||''};
   try{
     const payload=directPairingPayload(started.pairing),qrBase64=Android.createLanSyncQrPngBase64(payload,640);
     if(!qrBase64)throw Error('QR-koodi loomine ebaõnnestus.');
     const archive=await JSZip.loadAsync(baseline,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Baaspaketist puudub manifest.');
     const manifest=JSON.parse(await mf.async('string'));
-    return {status:'STARTED',pairing:parseDirectSyncQr(payload),payload,qrBase64,manifest,baselineSize:baseline.length,baselineBase64:bytesToBase64(baseline),deferred};
+    return {status:'STARTED',pairing:parseDirectSyncQr(payload),payload,qrBase64,manifest,baselineSize:baseline.length,baselineBytes:baseline,deferred};
   }catch(e){try{if(typeof Android.stopLanSyncSessionFor==='function'&&started.pairing?.sessionId)Android.stopLanSyncSessionFor(started.pairing.sessionId);else Android.stopLanSyncSession();}catch(ignore){}throw e;}
 }
 function cancelDirectSyncHost(){
@@ -1838,52 +1899,73 @@ async function respondDirectHost(session,payload,terminal){
   return !!Android.respondLanSyncSession(bytesToBase64(bytes),!!terminal);
 }
 async function runDirectSyncHostR4(session,generation){
-  let prepared=null,hostDelta=null,hostDeltaHash='',peerDeviceId='';
+  let prepared=null,hostDelta=null,hostDeltaHash='',peerDeviceId='',hostState='WAIT_CLIENT_INITIAL',incoming=null,outgoing=null;
+  async function sendHostPackage(bytes,phase,nextState,terminal=false){
+    if(bytes.length<=DIRECT_SYNC_MAX_BYTES){if(!await respondDirectHost(session,bytes,terminal))throw Error('CONNECTION_FAILED');hostState=nextState;return;}
+    outgoing=await createDirectPackageTransfer(bytes,phase,session.pairing);hostState=phase==='bootstrap'?'SENDING_BOOTSTRAP':'SENDING_HOST_DELTA';
+    if(!await respondDirectHost(session,directChunkControl(outgoing.meta),false))throw Error('CONNECTION_FAILED');
+  }
+  async function prepareClientInitial(bytes){
+    prepared=await processSyncPackageBytes(bytes,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directPrepareOnly:true,directRole:'TELEFON B → TELEFON A'});
+    if(!prepared?.accepted)throw Error('USER_CANCELLED');peerDeviceId=prepared.manifest.senderDeviceId||'';
+    if(!peerDeviceId||peerDeviceId===TC.deviceId)throw Error('SAME_DEVICE');
+    hostDelta=await createSyncDeltaBytes();if(hostDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');hostDeltaHash=await digest(hostDelta);
+    renderDirectHostWaitScreen(session,'Teise telefoniga saadetud kontrollid ja parandused kinnituse järel salvestatakse.');
+    await sendHostPackage(hostDelta,'host-delta','WAIT_CLIENT_FINAL',false);
+  }
+  async function commitClientFinal(bytes){
+    if(!prepared||!peerDeviceId)throw Error('SYNC_PROTOCOL_INVALID');
+    const finalResult=await processSyncPackageBytes(bytes,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directApplyConfirmed:true,directRole:'TELEFON B → TELEFON A'});
+    if(!finalResult?.accepted)throw Error('SYNC_REJECTED');if(finalResult.manifest.senderDeviceId!==peerDeviceId)throw Error('SYNC_PEER_CHANGED');
+    const ack=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_COMMITTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:TC.deviceId,clientDeviceId:peerDeviceId,hostDeltaHash,clientDeltaHash:await digest(bytes),hostApplied:finalResult.report?.applied||0,hostDuplicates:finalResult.report?.duplicates||0,completedAt:new Date().toISOString()});
+    if(!await respondDirectHost(session,decode64(ack),true))throw Error('CONNECTION_FAILED');
+    const completed=await pollDirectHostEvent(session,generation);if(completed.status!=='COMPLETED')return completed;
+    return {status:'COMPLETED',prepared,hostDeltaHash,finalResult};
+  }
   while(generation===directHostGeneration){
     const event=await pollDirectHostEvent(session,generation);if(event.status==='CANCELLED')return {status:'CANCELLED'};
     if(event.status==='EXPIRED')return {status:'EXPIRED'};
     if(event.status==='ERROR'||event.status==='STOPPED')return event;
     if(event.status==='COMPLETED')return {status:'COMPLETED',prepared,hostDeltaHash};
     const payload=decode64(event.requestBase64||'');
-    if(event.status==='REQUEST_RECEIVED'){
-      if(hostRequestIsBootstrap(event,session)){
-        if(!await respondDirectHost(session,decode64(session.baselineBase64),true))return {status:'ERROR'};
-        const completed=await pollDirectHostEvent(session,generation);return {status:completed.status,bootstrap:true};
+    try{
+      const message=directChunkMessage(payload);
+      if(hostState==='SENDING_BOOTSTRAP'||hostState==='SENDING_HOST_DELTA'){
+        if(!outgoing||!message||message.type!=='CHUNK_REQUEST'||message.transferId!==outgoing.meta.transferId||message.phase!==outgoing.meta.phase||message.chunkCount!==outgoing.meta.chunkCount)throw Error('CHUNK_REQUEST_INVALID');
+        validateDirectChunkBinding(message,session.pairing);const index=Number(message.chunkIndex);if(!Number.isInteger(index)||index<0||index>=outgoing.meta.chunkCount)throw Error('CHUNK_INDEX_INVALID');
+        const last=index===outgoing.meta.chunkCount-1,bootstrap=hostState==='SENDING_BOOTSTRAP';
+        if(!await respondDirectHost(session,directChunkData(outgoing,index),bootstrap&&last))throw Error('CONNECTION_FAILED');
+        if(last){outgoing=null;if(bootstrap){const completed=await pollDirectHostEvent(session,generation);return {status:completed.status,bootstrap:true};}hostState='WAIT_CLIENT_FINAL';}
+        continue;
       }
-      try{
-        prepared=await processSyncPackageBytes(payload,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directPrepareOnly:true,directRole:'TELEFON B → TELEFON A'});
-        if(!prepared?.accepted){const reject=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_REJECTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason:'USER_CANCELLED'});await respondDirectHost(session,decode64(reject),true);return {status:'CANCELLED'};}
-        peerDeviceId=prepared.manifest.senderDeviceId||'';
-        if(!peerDeviceId||peerDeviceId===TC.deviceId)throw Error('SAME_DEVICE');
-        hostDelta=await createSyncDeltaBytes();if(hostDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');hostDeltaHash=await digest(hostDelta);
-        renderDirectHostWaitScreen(session,'Teise telefoniga saadetud kontrollid ja parandused kinnituse järel salvestatakse.');
-        if(!await respondDirectHost(session,hostDelta,false))throw Error('CONNECTION_FAILED');
-      }catch(e){
-        const reason=e.message||'SYNC_REJECTED',reject=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_REJECTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason});
-        await respondDirectHost(session,decode64(reject),true);return {status:'ERROR',error:reason};
+      if(incoming){
+        if(!message||message.type!=='CHUNK_DATA')throw Error('CHUNK_DATA_INVALID');const accepted=addDirectChunk(incoming,message);
+        if(!accepted.complete){if(!await respondDirectHost(session,directChunkRequest(incoming.meta,accepted.nextIndex),false))throw Error('CONNECTION_FAILED');continue;}
+        const phase=incoming.meta.phase,assembled=await assembleDirectChunks(incoming);incoming=null;
+        if(phase==='client-initial'){await prepareClientInitial(assembled);continue;}
+        if(phase==='client-final')return await commitClientFinal(assembled);
+        throw Error('CHUNK_PHASE_INVALID');
       }
-      continue;
-    }
-    if(event.status==='ACK_RECEIVED'){
+      if(message?.type==='PACKAGE_META'){
+        const expected=hostState==='WAIT_CLIENT_INITIAL'?'client-initial':hostState==='WAIT_CLIENT_FINAL'?'client-final':'';if(!expected)throw Error('CHUNK_PHASE_INVALID');
+        incoming=createDirectChunkAssembler(message,session.pairing,expected);if(!await respondDirectHost(session,directChunkRequest(message,0),false))throw Error('CONNECTION_FAILED');continue;
+      }
+      if(hostState==='WAIT_CLIENT_INITIAL'&&hostRequestIsBootstrap(event,session)){
+        const baseline=session.baselineBytes;if(!(baseline instanceof Uint8Array)||!baseline.length)throw Error('PACKAGE_INVALID');
+        await sendHostPackage(baseline,'bootstrap','COMPLETED',true);if(baseline.length<=DIRECT_SYNC_MAX_BYTES){const completed=await pollDirectHostEvent(session,generation);return {status:completed.status,bootstrap:true};}continue;
+      }
+      if(hostState==='WAIT_CLIENT_INITIAL'){await prepareClientInitial(payload);continue;}
+      if(hostState!=='WAIT_CLIENT_FINAL')throw Error('SYNC_PROTOCOL_INVALID');
       const control=directControlFromBase64(event.requestBase64);
       if(control?.format===DIRECT_SYNC_COMMIT_FORMAT&&control.version===1&&control.phase==='CLIENT_ABORT'
         &&control.sessionId===session.pairing.sessionId&&control.dbId===TC.dbId&&control.epoch===TC.sync.epoch){
         const aborted=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_ABORTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch});
         await respondDirectHost(session,decode64(aborted),true);return {status:'CANCELLED'};
       }
-      try{
-        if(!prepared||!peerDeviceId)throw Error('SYNC_PROTOCOL_INVALID');
-        const finalResult=await processSyncPackageBytes(payload,'DOLD_TELEFON_B_SÜNKROON.dtcs',null,{directProtocol:true,directApplyConfirmed:true,directRole:'TELEFON B → TELEFON A'});
-        if(!finalResult?.accepted)throw Error('SYNC_REJECTED');
-        if(finalResult.manifest.senderDeviceId!==peerDeviceId)throw Error('SYNC_PEER_CHANGED');
-        const ack=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_COMMITTED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:TC.deviceId,clientDeviceId:peerDeviceId,hostDeltaHash,clientDeltaHash:await digest(payload),hostApplied:finalResult.report?.applied||0,hostDuplicates:finalResult.report?.duplicates||0,completedAt:new Date().toISOString()});
-        if(!await respondDirectHost(session,decode64(ack),true))throw Error('CONNECTION_FAILED');
-        const completed=await pollDirectHostEvent(session,generation);if(completed.status!=='COMPLETED')return completed;
-        return {status:'COMPLETED',prepared,hostDeltaHash,finalResult};
-      }catch(e){
-        const failed=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase:'SYNC_UNCONFIRMED',sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason:e.message||'SYNC_FAILED'});
-        await respondDirectHost(session,decode64(failed),true);return {status:'ERROR',error:e.message||'SYNC_FAILED',prepared};
-      }
+      return await commitClientFinal(payload);
+    }catch(e){
+      const reason=e.message||'SYNC_FAILED',phase=prepared?'SYNC_UNCONFIRMED':'SYNC_REJECTED',failed=directControlMessage({format:DIRECT_SYNC_COMMIT_FORMAT,version:1,phase,sessionId:session.pairing.sessionId,dbId:TC.dbId,epoch:TC.sync.epoch,reason});
+      await respondDirectHost(session,decode64(failed),true);return {status:'ERROR',error:reason,prepared};
     }
   }
   return {status:'CANCELLED'};
@@ -1940,13 +2022,13 @@ async function findExistingDirectDatabase(){
   return latest?.dbId?{dbId:latest.dbId,fileName:latest.fileName||''}:null;
 }
 async function validateDirectBaselineBytes(bytes,pairing){
-  if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);if(!bytes.length||bytes.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');
+  if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);if(!bytes.length||bytes.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
   const archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('PACKAGE_INVALID');
   const manifest=JSON.parse(await mf.async('string'));
   if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==1||manifest.mode!=='baseline'||!manifest.dbId||!manifest.epoch)throw Error('PACKAGE_INVALID');
   if(await digest(new TextEncoder().encode(String(manifest.dbId)))!==pairing.lineage)throw Error('LINEAGE_MISMATCH');
   const stateFile=archive.file(manifest.state?.path||'state.json'),workbookFile=archive.file(manifest.workbook?.path||'workbook.xlsx');
-  if(!stateFile||!workbookFile||!Number.isFinite(Number(manifest.state?.size))||!Number.isFinite(Number(manifest.workbook?.size))||Number(manifest.state.size)>DIRECT_SYNC_MAX_BYTES||Number(manifest.workbook.size)>DIRECT_SYNC_MAX_BYTES)throw Error('PACKAGE_INVALID');
+  if(!stateFile||!workbookFile||!Number.isFinite(Number(manifest.state?.size))||!Number.isFinite(Number(manifest.workbook?.size))||Number(manifest.state.size)>DIRECT_SYNC_MAX_PACKAGE_BYTES||Number(manifest.workbook.size)>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PACKAGE_INVALID');
   const stateBytes=await stateFile.async('uint8array'),workbookBytes=await workbookFile.async('uint8array');
   if(stateBytes.length!==manifest.state.size||workbookBytes.length!==manifest.workbook.size||await digest(stateBytes)!==manifest.state.sha256||await digest(workbookBytes)!==manifest.workbook.sha256)throw Error('INTEGRITY_FAILURE');
   return {manifest,archive};
@@ -1964,6 +2046,24 @@ async function directClientExchange(pairing,expectedDbId,payload){
   if(!start.ok||!start.jobId)throw Error(start.status||'CONNECTION_FAILED');
   const result=await waitDirectClientJob(start.jobId,pairing.expiresAt);if(result.result!=='SUCCESS')throw Error(result.result||'CONNECTION_FAILED');
   return decode64(result.responseBase64||'');
+}
+async function directClientUploadPackage(pairing,expectedDbId,bytes,phase,exchange=directClientExchange){
+  if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);if(bytes.length<=DIRECT_SYNC_MAX_BYTES)return exchange(pairing,expectedDbId,bytes);
+  const transfer=await createDirectPackageTransfer(bytes,phase,pairing);let response=await exchange(pairing,expectedDbId,directChunkControl(transfer.meta)),attempts=0;
+  while(true){
+    const request=directChunkMessage(response);if(!request||request.type!=='CHUNK_REQUEST')return response;
+    validateDirectChunkBinding(request,pairing);if(request.transferId!==transfer.meta.transferId||request.phase!==phase||request.chunkCount!==transfer.meta.chunkCount||!Number.isInteger(request.chunkIndex)||request.chunkIndex<0||request.chunkIndex>=transfer.meta.chunkCount)throw Error('CHUNK_REQUEST_INVALID');
+    if(++attempts>transfer.meta.chunkCount*3+8)throw Error('CHUNK_RETRY_LIMIT');response=await exchange(pairing,expectedDbId,directChunkData(transfer,request.chunkIndex));
+  }
+}
+async function directClientReceivePackage(pairing,expectedDbId,firstResponse,phase,exchange=directClientExchange){
+  const meta=directChunkMessage(firstResponse);if(!meta||meta.type!=='PACKAGE_META')return firstResponse;
+  const assembler=createDirectChunkAssembler(meta,pairing,phase);let attempts=0;
+  while(directNextMissingChunk(assembler)>=0){
+    const index=directNextMissingChunk(assembler);if(++attempts>meta.chunkCount*3+8)throw Error('CHUNK_RETRY_LIMIT');
+    const response=await exchange(pairing,expectedDbId,directChunkRequest(meta,index)),message=directChunkMessage(response);if(!message||message.type!=='CHUNK_DATA')throw Error('CHUNK_DATA_INVALID');addDirectChunk(assembler,message);
+  }
+  return assembleDirectChunks(assembler);
 }
 function validateDirectSyncCommitAck(bytes,pairing,expected){
   const message=directControlFromBase64(bytesToBase64(bytes));
@@ -1987,8 +2087,8 @@ async function handleDirectSyncQr(raw){
       if(!window.Android||typeof Android.startLanSyncClient!=='function'||typeof Android.getLanSyncClientResult!=='function')throw Error('CONNECTION_FAILED');
       setDirectStatusScreen('ÜHENDAMINE...','Vahetan mõlema telefoni muudatused. Ühtegi muudatust ei rakendata enne kokkuvõtte ja kinnituse kuvamist.');
       let firstDelta;setBusy(true);try{firstDelta=await createSyncDeltaBytes();}finally{setBusy(false);}
-      if(firstDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');
-      const hostBytes=await directClientExchange(pairing,TC.dbId,firstDelta),hostDeltaHash=await digest(hostBytes);
+      if(firstDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
+      const hostResponse=await directClientUploadPackage(pairing,TC.dbId,firstDelta,'client-initial'),hostBytes=await directClientReceivePackage(pairing,TC.dbId,hostResponse,'host-delta'),hostDeltaHash=await digest(hostBytes);
       const hostControl=directControlFromBase64(bytesToBase64(hostBytes));
       if(hostControl?.format===DIRECT_SYNC_COMMIT_FORMAT&&hostControl.phase==='SYNC_REJECTED')throw Error(hostControl.reason||'SYNC_REJECTED');
       if(hostControl?.format===DIRECT_SYNC_COMMIT_FORMAT)throw Error(hostControl.reason||'SYNC_REJECTED');
@@ -2001,8 +2101,8 @@ async function handleDirectSyncQr(raw){
       }
       localR4Committed=true;
       setDirectStatusScreen('SÜNKROONIMINE...','Sinu muudatused salvestati. Kinnitan teise telefoni salvestuse.');setBusy(true);
-      const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
-      const ackBytes=await directClientExchange(pairing,TC.dbId,clientFinalDelta);setBusy(false);closeDirectStatusScreen();
+      const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
+      const ackBytes=await directClientUploadPackage(pairing,TC.dbId,clientFinalDelta,'client-final');setBusy(false);closeDirectStatusScreen();
       const ack=validateDirectSyncCommitAck(ackBytes,pairing,{dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:received.manifest.senderDeviceId,clientDeviceId:TC.deviceId,hostDeltaHash,clientDeltaHash});
       await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(received.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);renderSyncStatus();return !!ack;
     }
@@ -2010,11 +2110,7 @@ async function handleDirectSyncQr(raw){
     let localDeviceId=installationDeviceId();TC.deviceId=localDeviceId;
     const request=bytesToBase64(new TextEncoder().encode(JSON.stringify({format:DIRECT_SYNC_BOOTSTRAP_FORMAT,version:1,action:'REQUEST_BASELINE',lineage:pairing.lineage})));
     setDirectStatusScreen('ÜHENDAMINE...','Ootan teise telefoni vastust. Tööbaas laaditakse alles pärast kontrolli ja kinnitust.');setBusy(true);
-    let start;try{start=JSON.parse(Android.startLanSyncClient(JSON.stringify(pairing),'',request));}catch(e){throw Error('CONNECTION_FAILED');}
-    if(!start.ok||!start.jobId)throw Error(start.status||'CONNECTION_FAILED');
-    const result=await waitDirectClientJob(start.jobId,pairing.expiresAt);
-    if(result.result!=='SUCCESS')throw Error(result.result||'CONNECTION_FAILED');
-    const bytes=decode64(result.responseBase64||''),checked=await validateDirectBaselineBytes(bytes,pairing);
+    const firstResponse=await directClientExchange(pairing,'',decode64(request)),bytes=await directClientReceivePackage(pairing,'',firstResponse,'bootstrap'),checked=await validateDirectBaselineBytes(bytes,pairing);
     if(checked.manifest.senderDeviceId===localDeviceId){localDeviceId='device-'+uid();try{localStorage.setItem('dold_techcontrol_device_id_v1',localDeviceId);}catch(e){}TC.deviceId=localDeviceId;}
     closeDirectStatusScreen();setBusy(false);
     await processSyncPackageBytes(bytes,checked.manifest.fileName||'DOLD_Teise_telefoni_baas.dtcs',null,{directBootstrap:true,expectedLineage:pairing.lineage,localDeviceId});

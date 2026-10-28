@@ -388,7 +388,7 @@ await test('R1 package valid .dtcs.zip routes to the same sync baseline importer
 });
 await test('R1 package manifest overrides a misleading filename and package share uses dedicated MIME types',async()=>{
  await emptyR1Workspace('r1-misleading-name-receiver','f');const dialogs=[];await importIncomingBytes(r1WorkPackageBytes,'ordinary-report.xlsx',['incoming'],(_i,title)=>dialogs.push(title));
- assert.equal(run('TC.dbId'),r1WorkPackageDbId);assert(dialogs.includes('Võta töö vastu'));assert.equal(run('WORK_PACKAGE_MIME'),'application/vnd.dold.techcontrol.workpackage');assert.equal(run('SYNC_PACKAGE_MIME'),'application/vnd.dold.techcontrol.syncpackage');
+ assert.equal(run('TC.dbId'),r1WorkPackageDbId);assert(dialogs.includes('Võta töö vastu'));assert.equal(run('WORK_PACKAGE_MIME'),'application/zip');assert.equal(run('SYNC_PACKAGE_MIME'),'application/zip');
 });
 await test('R1 package corrupt ZIP is rejected without changing the active workspace',async()=>{
  await freshWorkspace('r1-corrupt-active',bytes);await run('continueLastWorkingFile()');const before=await run('(async()=>await storeCall("get",TC.dbId))()'),alertStart=alerts.length;
@@ -571,7 +571,7 @@ async function r4RunSession(phoneA,phoneB,dbId,conflictChoice='remote',fault={})
   for(let i=0;i<maxPolls&&(!hostDone||!clientDone);i++){
     for(const [role,ctx] of [['A',phoneA],['B',phoneB]]){
       let active=false;try{active=ctx.run("typeof appDialogResolve==='function'");}catch(e){}
-      if(active){const title=ctx.run("$('appDialogTitle')?.textContent||''"),body=ctx.run("$('appDialogBody')?.innerHTML||''");net.dialogs.push({role,title,body});let choice='done';if(title==='SÜNKROONIMINE')choice=conflictChoice==='cancel-client-preview'&&role==='B'?'cancel':'sync';else if(title==='ANDMETE VASTUOLU')choice=conflictChoice;else if(title==='LISA UUS KONTROLL')choice='create';else if(title.includes('ON JUBA KONTROLLITUD'))choice='new';ctx.run(`appDialogChoice(${JSON.stringify(choice)})`);}
+      if(active){const title=ctx.run("$('appDialogTitle')?.textContent||''"),body=ctx.run("$('appDialogBody')?.innerHTML||''");net.dialogs.push({role,title,body});let choice='done';if(title==='SÜNKROONIMINE')choice=conflictChoice==='cancel-client-preview'&&role==='B'?'cancel':'sync';else if(title==='ANDMETE VASTUOLU')choice=conflictChoice;else if(title==='UUS TELEFON')choice='initialize';else if(title==='LISA UUS KONTROLL')choice='create';else if(title.includes('ON JUBA KONTROLLITUD'))choice='new';ctx.run(`appDialogChoice(${JSON.stringify(choice)})`);}
     }
     await new Promise(resolve=>setTimeout(resolve,2));
   }
@@ -580,6 +580,24 @@ async function r4RunSession(phoneA,phoneB,dbId,conflictChoice='remote',fault={})
   return {net,clientValue,dialogs:net.dialogs};
  }finally{net.cleanup();}
 }
+let recoveryChunkPair=null;
+await test('Recovery chunked transport bootstraps a second phone from a baseline above 1 MiB',async()=>{
+ const oldEnv=env,oldStore=storeDir,deviceKey='dold_techcontrol_device_id_v1';
+ settings.set(deviceKey,'device-'+'a'.repeat(32));await freshWorkspace('recovery-chunk-phone-a',bytes);const phoneA=env,dirA=storeDir;
+ await run('continueLastWorkingFile()');await run('resetRingProgress()');await run('continueCycle()');const baseline=await run('createSyncBaselineBytes()'),dbId=run('TC.dbId'),deviceA=run('TC.deviceId');assert(baseline.length>1024*1024,'fixture baseline did not exercise chunking');
+ await r3EmptyWorkspace('recovery-chunk-phone-b','b');const phoneB=env,dirB=storeDir,deviceB=run('TC.deviceId');
+ for(const [ctx,id] of [[phoneA,deviceA],[phoneB,deviceB]]){const local=new Map([[deviceKey,id]]);ctx.cx.localStorage={getItem:k=>local.get(k)??null,setItem:(k,v)=>local.set(k,String(v)),removeItem:k=>local.delete(k)};ctx.run(`TC.deviceId=${JSON.stringify(id)};TC.guard={remaining:100,pending:null}`);}
+ env=oldEnv;storeDir=oldStore;const session=await r4RunSession(phoneA,phoneB,dbId,'remote');
+ assert.equal(session.clientValue,true);assert(session.net.clientCalls.length>2,'baseline used the legacy single frame');assert.equal(phoneB.run('TC.dbId'),dbId);assert.equal(phoneA.run('TC.sync.epoch'),phoneB.run('TC.sync.epoch'));assert.notEqual(phoneA.run('TC.deviceId'),phoneB.run('TC.deviceId'));
+ recoveryChunkPair={phoneA,phoneB,dirA,dirB,dbId,deviceKey};console.log('RECOVERY_CHUNKED_BOOTSTRAP 1/1 PASS');
+});
+await test('Recovery chunked transport keeps two-way semantic sync and retry idempotent',async()=>{
+ assert(recoveryChunkPair,'chunk bootstrap prerequisite missing');const {phoneA,phoneB,dirA,dirB,dbId}=recoveryChunkPair;let kontrollId='',puudusId='',ownerDefectId='';
+ await r4WithEnv(phoneA,dirA,async()=>{await run('continueLastWorkingFile()');await run('continueCycle()');const cabinet=run('activeCabinets().find(c=>!S.sessionChecked.has(c.id)).id');await saveTestInspection(cabinet,'Recovery chunk defect');kontrollId=run(`savedEntry(${JSON.stringify(cabinet)}).syncId`);puudusId=run("TC.allDefects.find(d=>d.desc==='Recovery chunk defect').syncId");});
+ await r4WithEnv(phoneB,dirB,async()=>{await run('continueLastWorkingFile()');const defect=run('S.existingDefects[0]');ownerDefectId=defect.syncId;const updated=await run(`transaction(async()=>{const doc=await loadDoc('Puudused');writeSyncText(doc,'J',${defect.row},'Recovery Phone B owner');S.zip.file(S.paths.Puudused,xmlStr(doc));S.dirty=true;})`);assert(updated);});
+ const first=await r4RunSession(phoneA,phoneB,dbId,'remote');assert.equal(first.clientValue,true);assert.equal(phoneB.run(`TC.records.filter(r=>r.syncId===${JSON.stringify(kontrollId)}).length`),1);assert.equal(phoneB.run(`TC.allDefects.filter(d=>d.syncId===${JSON.stringify(puudusId)}).length`),1);assert.equal(phoneA.run(`TC.allDefects.find(d=>d.syncId===${JSON.stringify(ownerDefectId)}).owner`),'Recovery Phone B owner');
+ const before={aK:await r4Count(phoneA,'Kontrollid'),bK:await r4Count(phoneB,'Kontrollid'),aP:await r4Count(phoneA,'Puudused'),bP:await r4Count(phoneB,'Puudused')};const repeated=await r4RunSession(phoneA,phoneB,dbId,'remote');assert.equal(repeated.clientValue,true);assert.deepEqual({aK:await r4Count(phoneA,'Kontrollid'),bK:await r4Count(phoneB,'Kontrollid'),aP:await r4Count(phoneA,'Puudused'),bP:await r4Count(phoneB,'Puudused')},before);console.log('RECOVERY_CHUNKED_TWO_WAY 1/1 PASS');
+});
 await test('R4 bidirectional semantic sync converges in one QR session and protects conflicts/idempotency',async()=>{
  const pair=await r4PhonePair('r4-integration'),{phoneA,phoneB,dirA,dirB,dbId,deviceKey}=pair;
  const controls=[],newDefects=[];let oldDefectId='',baselineKontrollRows=0,baselineDefectRows=0,baselineCycle='',baselineChecked=0;
@@ -601,7 +619,7 @@ await test('R4 bidirectional semantic sync converges in one QR session and prote
  const r4Checks=[];function verify(name,condition,details=''){assert(condition,name+(details?' — '+details:''));r4Checks.push(name);results.push({name:'R4 '+name,status:'PASS'});}
  verify('A inspection operations were exchanged in the first proposal/response session',first.net.clientCalls.length===2&&first.net.hostResponses.length===2,JSON.stringify({calls:first.net.clientCalls.length,responses:first.net.hostResponses.length,status:first.net.hostStatus.status,dialogs:first.dialogs.map(d=>d.role+':'+d.title),client:first.clientValue,responseTerminal:first.net.lastTerminal}));
  verify('one QR pairing was sufficient for both directions',first.net.clientCalls.every(c=>c.pairing.sessionId===first.net.pairing.sessionId));
- verify('no Share or file picker transport was used',first.net.clientCalls.length===2&&first.net.initialResponse.length>100);
+ verify('no Share or file picker transport was used',first.net.started&&first.net.clientCalls.length>=2&&first.net.hostResponses.length===first.net.clientCalls.length);
  verify('host did not apply repair before client durable delta arrived',first.net.hostPreparedState?.openDefectCount>0);
  verify('same database lineage and epoch survived',phoneA.run('TC.dbId')===phoneB.run('TC.dbId')&&phoneA.run('TC.sync.epoch')===phoneB.run('TC.sync.epoch'));
  verify('device identities remain distinct',phoneA.run('TC.deviceId')!==phoneB.run('TC.deviceId'));

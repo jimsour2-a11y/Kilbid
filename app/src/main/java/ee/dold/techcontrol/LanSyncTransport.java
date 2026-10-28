@@ -57,6 +57,7 @@ public final class LanSyncTransport implements AutoCloseable {
     private static final int SERVER_POLL_MILLIS = 500;
     private static final int SOCKET_TIMEOUT_MILLIS = 12_000;
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 4_000;
+    private static final int MAX_DEFERRED_EXCHANGES = 512;
 
     public interface AddressProvider {
         InetAddress getLocalIpv4() throws IOException;
@@ -753,13 +754,13 @@ public final class LanSyncTransport implements AutoCloseable {
         }
 
         /**
-         * A bounded two-exchange session: proposal bytes, then the client's post-commit delta/receipt.
-         * Both exchanges use fresh challenges and the same short-lived QR session. The LAN layer only
-         * forwards opaque bytes; WebView code validates/applies semantic sync packages.
+         * A bounded multi-exchange session. Every exchange remains an independently authenticated,
+         * size-limited frame; JavaScript may use several frames to carry one verified .dtcs package.
+         * The LAN layer only forwards opaque bytes and never applies semantic sync data.
          */
         private void runDeferred() {
             try {
-                while (!terminal.get() && exchangeCount < 2) {
+                while (!terminal.get() && exchangeCount < MAX_DEFERRED_EXCHANGES) {
                     long remaining = pairing.expiresAt - System.currentTimeMillis();
                     if (remaining <= 0L) { terminate("EXPIRED", ""); return; }
                     server.setSoTimeout((int) Math.max(50L, Math.min(SERVER_POLL_MILLIS, remaining)));
@@ -827,7 +828,7 @@ public final class LanSyncTransport implements AutoCloseable {
                         }
                         writeResponse(out, STATUS_SUCCESS, response, challenge, pairing.token);
                         exchangeCount++;
-                        if (terminalResponse || exchangeCount >= 2) { terminate("COMPLETED", ""); return; }
+                        if (terminalResponse) { terminate("COMPLETED", ""); return; }
                         state = "WAITING_ACK";
                     } catch (SocketTimeoutException e) {
                         if (System.currentTimeMillis() >= pairing.expiresAt) terminate("EXPIRED", "");
@@ -840,6 +841,7 @@ public final class LanSyncTransport implements AutoCloseable {
                         currentSocket = null;
                     }
                 }
+                if (!terminal.get()) terminate("ERROR", "TOO_MANY_EXCHANGES");
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 if (!terminal.get()) terminate("ERROR", "TRANSPORT_ERROR");

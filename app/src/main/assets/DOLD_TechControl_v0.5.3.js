@@ -1393,7 +1393,7 @@ async function s2VerifyProductionCandidate(original,candidate,state,paths){
   await s2ValidateRichDataPackage(candidate,imageDoc);state.rich=state.rich||{metadataIndex:Number(pixelCell.getAttribute('vm'))-1};
 }
 async function commitProductionSignature(signatureId){
-  if(!TC.ready||!S.zip)throw s2SignatureBlock('WORKBOOK_NOT_OPEN','Ava aktiivne tööfail enne allkirja salvestamist.');
+  if(!TC.activated||!S.zip)throw s2SignatureBlock('WORKBOOK_NOT_OPEN','Ava aktiivne tööfail enne allkirja salvestamist.');
   if(!window.Android||typeof Android.readSignatureDraft!=='function')throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE','Telefoni allkirjamustandit ei saa turvaliselt lugeda.');
   let envelope;try{envelope=JSON.parse(Android.readSignatureDraft(signatureId));}catch(e){throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE','Telefoni allkirjamustandit ei saa lugeda.');}
   if(!envelope?.ok||!envelope.data)throw s2SignatureBlock('ANDROID_DRAFT_UNAVAILABLE',envelope?.error||'Telefoni allkirjamustandit ei leitud.');

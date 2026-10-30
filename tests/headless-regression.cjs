@@ -1274,6 +1274,18 @@ await test('S2 signature re-sign after Kontroll edit cancels old proof and links
   const retry=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(retry.already,true);assert.equal(await run(`(async()=>s2SignatureRowsById(await loadDoc('Allkirjad'),${JSON.stringify(draft.signatureId)}).length)()`),1);assert.equal(await run(`(async()=>{const j=await loadDoc('Allkirja_jaljed');return s2Rows(j,5,1048576).filter(r=>s2CellString(j,'A',r)===${JSON.stringify(draft.signatureId)}).length;})()`),200);assert.equal(beforeRows.j,200);
  }finally{env=previous.env;storeDir=previous.storeDir;clock.mono=previous.clock.mono;clock.offset=previous.clock.offset;}
 });
+await test('S3 signature commits from repair mode while the workbook is active without an active Kontroll session',async()=>{
+  await freshWorkspace('s3-parandus-repair-mode-workbook',s2TestWorkbook());
+  assert.equal(run('TC.activated'),true);assert.equal(run('TC.ready'),false);assert(run('!!S.zip'));
+  await run("openWorkMode('repair')");assert.equal(run('TC.ready'),false);
+  const repair=await s3CloseFixtureRepair(),capture=env.signatureStartCalls.pop();assert(capture);assert.equal(capture.recordId,repair.recordId);
+  const draft=await s2RegisterDraft(await s3MakeParandusDraft(repair.recordId,{points:s2SyntheticPoints(187,1)}));
+  await run(`onNativeSignatureDraftSaved(${JSON.stringify(JSON.stringify({signatureId:draft.signatureId,targetType:'Parandus',recordId:repair.recordId}))})`);
+  const committed=await run(`(async()=>{const p=await loadDoc('Parandused'),a=await loadDoc('Allkirjad'),row=s2Rows(p,5,500).find(r=>s2CellString(p,'A',r)===${JSON.stringify(repair.recordId)}),rows=s2SignatureRowsById(a,${JSON.stringify(draft.signatureId)});return {pointer:s2CellString(p,'I',row),status:s2CellString(p,'J',row),signatureRows:rows.length,signatureStatus:rows.length?s2CellString(a,'F',rows[0]):''};})()`);
+  assert.equal(committed.pointer,draft.signatureId);assert.equal(committed.status,'Kehtiv');assert.equal(committed.signatureRows,1);assert.equal(committed.signatureStatus,'Kehtiv');assert.equal(env.signatureDraftPayloads.has(draft.signatureId),true);
+  const retry=await run(`commitProductionSignature(${JSON.stringify(draft.signatureId)})`);assert.equal(retry.ok,true);assert.equal(retry.already,true);
+  assert.equal(await run(`(async()=>s2SignatureRowsById(await loadDoc('Allkirjad'),${JSON.stringify(draft.signatureId)}).length)()`),1);
+});
 await test('S3 signature cancel preserves repair and late-sign action starts a fresh capture',async()=>{
  const previous={env,storeDir,clock:{...clock}};try{
   await freshWorkspace('s3-parandus-cancel-late-sign',s2TestWorkbook());await run('continueCycle()');const repair=await s3CloseFixtureRepair();assert.equal(env.signatureStartCalls.length,1);run("onNativeSignatureCaptureCancelled('TAGASI')");

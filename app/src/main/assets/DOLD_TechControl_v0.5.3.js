@@ -55,7 +55,7 @@ async function clearDiagnosticLog(){
   try{if(!window.Android||typeof Android.clearDiagnosticLog!=='function'||!Android.clearDiagnosticLog())throw Error('CLEAR_FAILED');toast('Diagnostika tühjendatud.');}
   catch(e){toast('Diagnostikat ei saanud tühjendada.');}refreshDiagnosticPanel();
 }
-function newSyncState(){return {schema:1,epoch:uid(),entities:{Kontroll:{},Puudus:{},Cabinet:{}},journal:[],appliedOps:[],conflicts:[],peerAcks:{},deviceSequences:{},sequence:0};}
+function newSyncState(){return {schema:1,epoch:uid(),entities:{Kontroll:{},Puudus:{},Cabinet:{},Parandus:{},Signature:{}},journal:[],appliedOps:[],conflicts:[],peerAcks:{},deviceSequences:{},sequence:0};}
 function syncFieldString(v){return String(v??'').trim();}
 function syncControlBase(r){return [r.id,r.date,r.inspector,String(r.start??'')].map(syncFieldString).join('|');}
 function syncDefectBase(d){return [d.id,d.date,d.inspector,d.point].map(syncFieldString).join('|');}
@@ -76,6 +76,18 @@ function syncDefectValues(d){
   return values;
 }
 function syncCabinetValues(c){return {cabinetId:c.id,status:c.status||''};}
+function syncExcelUtcMs(value,name){
+  const serial=Number(value),utcMs=Math.round((serial-25569)*86400000);
+  if(!Number.isFinite(serial)||!Number.isSafeInteger(utcMs)||utcMs<0)throw Error(`Sünkroonitava ${name} UTC aeg on vigane.`);
+  return utcMs;
+}
+function syncParandusValues(r){
+  const recordId=String(r.recordId||'').trim(),kilpId=String(r.kilpId||'').trim(),puudusId=String(r.puudusId||'').trim(),kontrollId=String(r.kontrollId||'').trim(),recordVersion=Number(r.recordVersion);
+  if(!/^dtc-work-[A-Za-z0-9_-]{1,180}$/.test(recordId)||!/^EK-[0-9]{3,}$/.test(kilpId)||persistentSyncId('Puudus',puudusId)!==puudusId||persistentSyncId('Kontroll',kontrollId)!==kontrollId||!Number.isSafeInteger(recordVersion)||recordVersion<1)throw Error('Sünkroonitava Paranduse püsivad seosed või versioon on vigased.');
+  const performedAtUtcMs=syncExcelUtcMs(r.performedAt,'Paranduse'),exactUtcMs=syncExcelUtcMs(r.exactUtc,'Paranduse täpne');if(performedAtUtcMs!==exactUtcMs)throw Error('Sünkroonitava Paranduse UTC ajad ei klapi.');
+  const performedBy=String(r.performedBy||'').trim(),workText=String(r.workText||''),workStatus=String(r.workStatus||'').trim();if(!performedBy||!workText.trim()||!['Suletud','Osaline'].includes(workStatus))throw Error('Sünkroonitava Paranduse tööandmed on puudulikud.');
+  return {recordId,kilpId,puudusId,kontrollId,performedBy,performedAtUtcMs,exactUtcMs,workText,checkedBy:String(r.checkedBy||'').trim(),workStatus,recordVersion};
+}
 function syncCanonical(v){return JSON.stringify(v);}
 function cycleEntryControlIds(link){
   if(!link||typeof link!=='object')return[];
@@ -114,7 +126,7 @@ async function ensureSyncState(){
   if(!TC.dbId)return;
   TC.deviceId=installationDeviceId();
   if(!TC.sync||TC.sync.schema!==1||TC.sync.dbId!==TC.dbId){TC.sync={...newSyncState(),dbId:TC.dbId};}
-  TC.sync.entities??={Kontroll:{},Puudus:{},Cabinet:{}};for(const t of ['Kontroll','Puudus','Cabinet'])TC.sync.entities[t]??={};
+  TC.sync.entities??={Kontroll:{},Puudus:{},Cabinet:{},Parandus:{},Signature:{}};for(const t of ['Kontroll','Puudus','Cabinet','Parandus','Signature'])TC.sync.entities[t]??={};
   TC.sync.journal=Array.isArray(TC.sync.journal)?TC.sync.journal:[];TC.sync.appliedOps=Array.isArray(TC.sync.appliedOps)?TC.sync.appliedOps:[];TC.sync.conflicts=Array.isArray(TC.sync.conflicts)?TC.sync.conflicts:[];TC.sync.peerAcks=TC.sync.peerAcks&&typeof TC.sync.peerAcks==='object'?TC.sync.peerAcks:{};TC.sync.deviceSequences=TC.sync.deviceSequences&&typeof TC.sync.deviceSequences==='object'?TC.sync.deviceSequences:{};TC.sync.sequence=Math.max(0,Number(TC.sync.sequence)||0);
   const assign=async(type,items,baseOf,valuesOf)=>{
     const entities=TC.sync.entities[type],used=new Set(),groups=new Map();
@@ -408,13 +420,44 @@ async function appendSemanticOperations(beforeState){
   }
   return ops;
 }
+function appendStage2SyncOperation(entityType,entityId,action,payload){
+  const localSequence=nextSyncSequence(),opId=`${TC.deviceId}:${localSequence}`;
+  const op={schema:2,opId,deviceId:TC.deviceId,localSequence,createdAt:new Date().toISOString(),dbId:TC.dbId,epoch:TC.sync.epoch,entityType,entityId,action,baseRevision:0,baseFieldVersions:{payload:null},changedFields:{payload:cloneData(payload)}};
+  TC.sync.entities[entityType][entityId]={key:entityId,fieldVersions:{payload:opId},values:{payload:cloneData(payload)},revision:1};
+  TC.sync.journal.push(op);if(!TC.sync.appliedOps.includes(opId))TC.sync.appliedOps.push(opId);return op;
+}
+function signatureImmutablePayload(payload){
+  const value=cloneData(payload);delete value.status;delete value.revokedAtUtcMs;delete value.revocationReason;return value;
+}
+async function signatureImmutablePayloadHash(payload){return digest(new TextEncoder().encode(signatureCanonicalJson(signatureImmutablePayload(payload))));}
+async function reconcileStage2SyncState(){
+  if(!TC.sync||!S.zip)return;
+  TC.sync.entities.Parandus??={};TC.sync.entities.Signature??={};
+  for(const repair of TC.parandused){
+    const payload=syncParandusValues(repair),id=payload.recordId,entity=TC.sync.entities.Parandus[id];
+    if(!entity){appendStage2SyncOperation('Parandus',id,'ADD_PARANDUS',payload);continue;}
+    if(!fieldValueEqual(entity.values?.payload,payload))throw Error(`PARANDUS_ID_CONFLICT: ParandusID ${id} sisu ei klapi sünkroonimisajalooga.`);
+  }
+  const signatures=await collectWorkbookSignatureSyncRecords();
+  for(const [id,record] of signatures){
+    const payload=record.payload,entity=TC.sync.entities.Signature[id];
+    if(!entity){appendStage2SyncOperation('Signature',id,'ADD_SIGNATURE',payload);continue;}
+    const prior=entity.values?.payload;if(!prior||await signatureImmutablePayloadHash(prior)!==await signatureImmutablePayloadHash(payload))throw Error(`SIGNATURE_ID_CONFLICT: AllkiriID ${id} tõendusandmed ei klapi sünkroonimisajalooga.`);
+    if(prior.status===payload.status&&Number(prior.revokedAtUtcMs||0)===Number(payload.revokedAtUtcMs||0)&&String(prior.revocationReason||'')===String(payload.revocationReason||''))continue;
+    if(prior.status!=='Kehtiv'||payload.status!=='Tühistatud'||!payload.revokedAtUtcMs||!payload.revocationReason)throw Error(`SIGNATURE_STATUS_CONFLICT: AllkiriID ${id} olekut ei saa turvaliselt ühendada.`);
+    const localSequence=nextSyncSequence(),opId=`${TC.deviceId}:${localSequence}`,op={schema:2,opId,deviceId:TC.deviceId,localSequence,createdAt:new Date().toISOString(),dbId:TC.dbId,epoch:TC.sync.epoch,entityType:'Signature',entityId:id,action:'REVOKE_SIGNATURE',baseRevision:Number(entity.revision)||1,baseFieldVersions:{payload:entity.fieldVersions?.payload||null},changedFields:{payload:cloneData(payload)}};
+    entity.values.payload=cloneData(payload);entity.fieldVersions.payload=opId;entity.revision=(Number(entity.revision)||1)+1;TC.sync.journal.push(op);if(!TC.sync.appliedOps.includes(opId))TC.sync.appliedOps.push(opId);
+  }
+}
 function validSyncOperationShape(op){
-  if(!op||op.schema!==1||typeof op.opId!=='string'||typeof op.deviceId!=='string'||!/^device-[a-f0-9]{32}$/.test(op.deviceId)
+  if(!op||![1,2].includes(op.schema)||typeof op.opId!=='string'||typeof op.deviceId!=='string'||!/^device-[a-f0-9]{32}$/.test(op.deviceId)
     ||!Number.isSafeInteger(op.localSequence)||op.localSequence<1||op.opId!==`${op.deviceId}:${op.localSequence}`
-    ||typeof op.entityType!=='string'||typeof op.entityId!=='string'||!/^dtc-(kontroll|puudus|cabinet)-[A-Za-z0-9_-]{1,180}$/.test(op.entityId)
+    ||typeof op.entityType!=='string'||typeof op.entityId!=='string'||!/^dtc-(kontroll|puudus|cabinet|work|sign)-[A-Za-z0-9_-]{1,180}$/.test(op.entityId)
     ||!op.changedFields||typeof op.changedFields!=='object'||Array.isArray(op.changedFields)||!Object.keys(op.changedFields).length)return false;
-  const prefix={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-',Cabinet:'dtc-cabinet-'}[op.entityType];if(!prefix||!op.entityId.startsWith(prefix))return false;
-  const actions={Kontroll:['ADD_KONTROLL','UPDATE_KONTROLL'],Puudus:['ADD_PUUDUS','UPDATE_PUUDUS','CLOSE_PUUDUS'],Cabinet:['UPDATE_CABINET_STATUS']};if(!actions[op.entityType].includes(op.action))return false;
+  const prefix={Kontroll:'dtc-kontroll-',Puudus:'dtc-puudus-',Cabinet:'dtc-cabinet-',Parandus:'dtc-work-',Signature:'dtc-sign-'}[op.entityType];if(!prefix||!op.entityId.startsWith(prefix))return false;
+  const actions={Kontroll:['ADD_KONTROLL','UPDATE_KONTROLL'],Puudus:['ADD_PUUDUS','UPDATE_PUUDUS','CLOSE_PUUDUS'],Cabinet:['UPDATE_CABINET_STATUS'],Parandus:['ADD_PARANDUS'],Signature:['ADD_SIGNATURE','REVOKE_SIGNATURE']};if(!actions[op.entityType].includes(op.action))return false;
+  if(['Parandus','Signature'].includes(op.entityType))return op.schema===2&&Object.keys(op.changedFields).length===1&&op.changedFields.payload&&typeof op.changedFields.payload==='object'&&!Array.isArray(op.changedFields.payload);
+  if(op.schema!==1)return false;
   const fields={Kontroll:['cabinetId','date','area','inspector','panel','device','location','start','end','duration','exception','cycleId','note',...CHECKS.map(([col])=>'score_'+col)],Puudus:['cabinetId','date','inspector','cabinetTitle','location','point','description','priority','repeat','owner','due','repairer','closedAt','repairAction','lastCheckedBy','cycleId','kontrollId'],Cabinet:['cabinetId','status']};
   if(Object.keys(op.changedFields).some(field=>!fields[op.entityType].includes(field)))return false;
   if(op.baseFieldVersions!=null&&(typeof op.baseFieldVersions!=='object'||Array.isArray(op.baseFieldVersions)))return false;
@@ -611,7 +654,7 @@ async function persistWorkspace(){
   if(!TC.dbId||!S.zip)throw Error('Tööfail ei ole avatud');
   diagLog('INFO','WORKSPACE','SAVE_START',{dbId:TC.dbId,revision:Number(TC.revision)||0,workbook:S.fileName||''});
   try{
-    await ensureSyncState();await reconcileKontrollSignatureVersions();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
+    await ensureSyncState();await reconcileKontrollSignatureVersions();await reconcileStage2SyncState();TC.revision++;TC.updatedAt=new Date().toISOString();await writeMetadata();await forceRecalc();
     const bytes=await S.zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
     TC.localUsedAt=new Date().toISOString();
     const snapshot={schema:1,dbId:TC.dbId,fileName:S.fileName,registryKey:TC.registryKey,registryTokens:TC.registryTokens,cycle:TC.cycle,sync:TC.sync,signatureVersions:normalizeSignatureVersionMap(TC.signatureVersions),guard:TC.guard,revision:TC.revision,updatedAt:TC.updatedAt,lastUsedAt:TC.localUsedAt,sourceHash:TC.sourceHash,baseWorkbookBase64:TC.baseWorkbookBase64,inspector:S.inspector,dirty:S.dirty,workbookHash:await digest(bytes),summary:captureWorkspaceSummary({updatedAt:TC.updatedAt,revision:TC.revision}),workbookBase64:bytesToBase64(bytes)};
@@ -1148,6 +1191,42 @@ async function s2ValidateRichDataPackage(zip,imageDoc){
   const pictureRows=s2Rows(imageDoc,6,500);
   for(const row of pictureRows){const cell=getCell(imageDoc,'F'+row);if(cell?.getAttribute('vm'))await s2ResolveRichPicture(zip,cell);}
   return true;
+}
+async function validateSignatureSyncPayload(payload,asset=null){
+  if(!payload||typeof payload!=='object'||!/^dtc-sign-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(String(payload.signatureId||''))||!['Kontroll','Parandus'].includes(payload.targetType))throw s2SignatureBlock('PROOF_INCOMPLETE','Sünkroonitava allkirja püsiv ID või sihttüüp on vigane.');
+  if(payload.targetType==='Kontroll'&&persistentSyncId('Kontroll',payload.targetId)!==payload.targetId)throw s2SignatureBlock('UNRESOLVED_TARGET','Sünkroonitava allkirja KontrollID on vigane.');
+  if(payload.targetType==='Parandus'&&!/^dtc-work-[A-Za-z0-9_-]{1,180}$/.test(String(payload.targetId||'')))throw s2SignatureBlock('UNRESOLVED_TARGET','Sünkroonitava allkirja ParandusID on vigane.');
+  if(!/^EK-[0-9]{3,}$/.test(String(payload.kilpId||''))||!['Kehtiv','Tühistatud'].includes(payload.status)||!Number.isSafeInteger(Number(payload.recordVersion))||Number(payload.recordVersion)<1)throw s2SignatureBlock('PROOF_INCOMPLETE','Sünkroonitava allkirja siht, olek või versioon on vigane.');
+  for(const key of ['recordHash','strokeHash','pngHash','proofHash','nonce'])if(!/^[a-f0-9]{64}$/.test(String(payload[key]||'')))throw s2SignatureBlock('PROOF_INCOMPLETE',`Sünkroonitava allkirja ${key} on vigane.`);
+  if(!payload.proof||!payload.recordSnapshot||signatureCanonicalJson(payload.proof)!==String(payload.proofText||'')||signatureCanonicalJson(payload.recordSnapshot)!==String(payload.recordSnapshotText||''))throw s2SignatureBlock('PROOF_INCOMPLETE','Sünkroonitava allkirja proof või kirje hetktõmmis ei ole kanooniline.');
+  if(await digest(new TextEncoder().encode(payload.proofText))!==payload.proofHash)throw s2SignatureBlock('PROOF_HASH_MISMATCH','Sünkroonitava allkirja ProofHash ei klapi.');
+  if(await digest(new TextEncoder().encode(payload.recordSnapshotText))!==payload.recordHash)throw s2SignatureBlock('RECORD_HASH_MISMATCH','Sünkroonitava allkirja RecordHash ei klapi.');
+  const proof=payload.proof;if(proof.format!==S2_SIGNATURE_FORMATS.proof||proof.signatureId!==payload.signatureId||proof.targetType!==payload.targetType||proof.recordId!==payload.targetId||proof.kilpId!==payload.kilpId||proof.recordVersion!==Number(payload.recordVersion)||proof.recordHash!==payload.recordHash||proof.strokeHash!==payload.strokeHash||proof.pngHash!==payload.pngHash||proof.nonce!==payload.nonce||proof.pointCount!==Number(payload.pointCount)||proof.strokeCount!==Number(payload.strokeCount)||proof.canvasWidthPx!==Number(payload.canvasWidthPx)||proof.canvasHeightPx!==Number(payload.canvasHeightPx))throw s2SignatureBlock('PROOF_INCOMPLETE','Sünkroonitava allkirja proof ei klapi metaandmetega.');
+  if(payload.status==='Tühistatud'&&(!Number.isSafeInteger(Number(payload.revokedAtUtcMs))||Number(payload.revokedAtUtcMs)<=0||!String(payload.revocationReason||'').trim()))throw s2SignatureBlock('PROOF_INCOMPLETE','Tühistatud allkirjal puudub tühistamise aeg või põhjus.');
+  if(payload.status==='Kehtiv'&&(payload.revokedAtUtcMs||payload.revocationReason))throw s2SignatureBlock('PROOF_INCOMPLETE','Kehtival allkirjal on vastuolulised tühistamisandmed.');
+  if(asset){
+    if(asset.signatureId!==payload.signatureId||!(asset.png instanceof Uint8Array)||!asset.strokes||asset.strokes.format!==S2_SIGNATURE_FORMATS.strokes)throw s2SignatureBlock('ASSET_MISSING','Sünkroonitava allkirja PNG või puutepunktid puuduvad.');
+    if(await digest(asset.png)!==payload.pngHash||await digest(new TextEncoder().encode(signatureCanonicalJson(asset.strokes)))!==payload.strokeHash)throw s2SignatureBlock('HASH_MISMATCH','Sünkroonitava allkirja PNG või StrokeHash ei klapi.');
+    const dimensions=s2PngDimensions(asset.png);if(dimensions.width!==900||dimensions.height!==300||asset.strokes.canvasWidthPx!==Number(payload.canvasWidthPx)||asset.strokes.canvasHeightPx!==Number(payload.canvasHeightPx)||asset.strokes.points.length!==Number(payload.pointCount)||asset.strokes.points.reduce((m,p)=>Math.max(m,Number(p[0])||0),0)!==Number(payload.strokeCount))throw s2SignatureBlock('STROKES_INVALID','Sünkroonitava allkirja PNG mõõtmed või punktide arv ei klapi.');
+    s2BuildStrokes({...payload,points:asset.strokes.points,captureDurationMs:Number(payload.captureDurationMs)});
+  }
+  return true;
+}
+async function collectWorkbookSignatureSyncRecords(){
+  const records=new Map();if(!S.paths.Allkirjad||!S.paths.Allkirja_jaljed||!S.paths['Allkirjade pildid'])return records;
+  const signatureDoc=await loadDoc('Allkirjad'),strokeDoc=await loadDoc('Allkirja_jaljed'),imageDoc=await loadDoc('Allkirjade pildid');await s2ValidateRichDataPackage(S.zip,imageDoc);
+  for(const row of s2Rows(signatureDoc,5,500)){
+    const signatureId=s2CellString(signatureDoc,'A',row);if(!signatureId||s2CellString(signatureDoc,'AZ',row)!==S2_SIGNATURE_FORMATS.proof)continue;
+    if(records.has(signatureId))throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Allkirjad lehel kordub sünkroonitav AllkiriID.');
+    const proofText=s2CellString(signatureDoc,'BN',row),recordSnapshotText=s2CellString(signatureDoc,'S',row);let proof,recordSnapshot;try{proof=JSON.parse(proofText);recordSnapshot=JSON.parse(recordSnapshotText);}catch(e){throw s2SignatureBlock('PROOF_INCOMPLETE','Sünkroonitava allkirja proof või kirje hetktõmmis ei ole loetav.');}
+    const status=s2CellString(signatureDoc,'F',row),revokedTyped=signatureTypedCellValue(signatureDoc,'P',row),revokedAtUtcMs=status==='Tühistatud'?s2ExcelDateToUtcMs(revokedTyped,`Allkirjad!P${row}`):null;
+    const imageRows=s2Rows(imageDoc,6,500).filter(r=>s2CellString(imageDoc,'A',r)===signatureId);if(imageRows.length!==1)throw s2SignatureBlock('ASSET_MISSING','Sünkroonitava allkirja pildikirje puudub või kordub.');
+    const picture=await s2ResolveRichPicture(S.zip,getCell(imageDoc,'F'+imageRows[0])),points=s2Rows(strokeDoc,5,1048576).filter(r=>s2CellString(strokeDoc,'A',r)===signatureId).map(r=>['B','C','D','E','F'].map(col=>Number(s2CellString(strokeDoc,col,r))));
+    const strokes={format:S2_SIGNATURE_FORMATS.strokes,canvasWidthPx:Number(s2CellString(signatureDoc,'BJ',row)),canvasHeightPx:Number(s2CellString(signatureDoc,'BK',row)),points};
+    const payload={signatureId,targetType:s2CellString(signatureDoc,'B',row),targetId:s2CellString(signatureDoc,'C',row),kilpId:String(proof.kilpId||''),recordVersion:Number(s2CellString(signatureDoc,'I',row)),signerName:s2CellString(signatureDoc,'D',row),signedAtUtcMs:Number(proof.signedAtUtcMs),captureStartedAtUtcMs:Number(proof.captureStartedAtUtcMs),captureEndedAtUtcMs:Number(proof.captureEndedAtUtcMs),captureDurationMs:Number(proof.captureDurationMs),nonce:s2CellString(signatureDoc,'BB',row),recordHash:s2CellString(signatureDoc,'J',row),strokeHash:s2CellString(signatureDoc,'BG',row),pngHash:s2CellString(signatureDoc,'K',row),proofHash:s2CellString(signatureDoc,'BA',row),status,revokedAtUtcMs,revocationReason:status==='Tühistatud'?s2CellString(signatureDoc,'Q',row):'',priorSignatureId:s2CellString(signatureDoc,'O',row),strokeCount:Number(s2CellString(signatureDoc,'BH',row)),pointCount:Number(s2CellString(signatureDoc,'BI',row)),canvasWidthPx:Number(s2CellString(signatureDoc,'BJ',row)),canvasHeightPx:Number(s2CellString(signatureDoc,'BK',row)),inputMethod:s2CellString(signatureDoc,'BE',row),rendererProfile:String(proof.rendererProfile||''),clockSource:String(proof.clockSource||''),deviceInstanceId:s2CellString(signatureDoc,'BO',row),appVersionName:s2CellString(signatureDoc,'BP',row),appVersionCode:Number(proof.appVersionCode),androidRelease:String(proof.androidRelease||''),androidApiLevel:Number(proof.androidApiLevel),recordFormat:s2CellString(signatureDoc,'R',row),strokeFormat:s2CellString(signatureDoc,'BF',row),proof,proofText,recordSnapshot,recordSnapshotText};
+    const asset={signatureId,png:picture.png,strokes};await validateSignatureSyncPayload(payload,asset);if(picture.pngHash!==payload.pngHash||s2CellString(imageDoc,'G',imageRows[0])!==payload.pngHash)throw s2SignatureBlock('HASH_MISMATCH','Sünkroonitava allkirja Rich Data PNG hash ei klapi.');records.set(signatureId,{payload,asset});
+  }
+  return records;
 }
 function s2ExistingSignatureRegistry(signaturesDoc,imagesDoc){
   const imageHashes=new Map();for(const row of s2Rows(imagesDoc,6,500)){const id=s2CellString(imagesDoc,'A',row);if(!id)continue;if(imageHashes.has(id))throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Allkirjade piltide lehel kordub AllkiriID.');imageHashes.set(id,s2CellString(imagesDoc,'G',row)||null);}
@@ -1773,6 +1852,7 @@ async function shareWorkPackage(){
   catch(e){if(e?.name!=='AbortError')alert('Töö üleandmine ebaõnnestus. Telefoni töö jäi alles.\n'+e.message);}finally{setBusy(false);}
 }
 const SYNC_PACKAGE_FORMAT='DOLD-TECHCONTROL-SYNC-PACKAGE';
+const SYNC_PACKAGE_VERSION=2;
 function syncOpsSummary(ops){
   const out={newControls:0,newDefects:0,repairedDefects:0,otherChanges:0,total:ops.length};
   for(const op of ops){if(op.action==='ADD_KONTROLL')out.newControls++;else if(op.action==='ADD_PUUDUS')out.newDefects++;else if(op.action==='CLOSE_PUUDUS')out.repairedDefects++;else out.otherChanges++;}
@@ -1785,13 +1865,42 @@ async function createSyncBaselineBytes(){
   const workbookBytes=await persistWorkspace(),snapshot=TC.startupSnapshot,workbookHash=await digest(workbookBytes),summary=await summarizeWorkbookBytes(workbookBytes,S.fileName,snapshot.cycle,{updatedAt:snapshot.updatedAt,revision:snapshot.revision});
   const state={schema:1,dbId:snapshot.dbId,fileName:snapshot.fileName,registryKey:snapshot.registryKey,registryTokens:snapshot.registryTokens,cycle:snapshot.cycle,sync:snapshot.sync,signatureVersions:normalizeSignatureVersionMap(snapshot.signatureVersions),revision:snapshot.revision,updatedAt:snapshot.updatedAt,sourceHash:snapshot.sourceHash,workbookHash,inspector:snapshot.inspector,dirty:snapshot.dirty,summary};
   const stateBytes=new TextEncoder().encode(JSON.stringify(state)),stateHash=await digest(stateBytes),zip=new JSZip();zip.file('workbook.xlsx',workbookBytes);zip.file('state.json',stateBytes);
-  const manifest={format:SYNC_PACKAGE_FORMAT,version:1,mode:'baseline',createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,epoch:state.sync.epoch,senderDeviceId:TC.deviceId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',sha256:stateHash,size:stateBytes.length},summary};
+  const manifest={format:SYNC_PACKAGE_FORMAT,version:SYNC_PACKAGE_VERSION,mode:'baseline',createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:state.dbId,epoch:state.sync.epoch,senderDeviceId:TC.deviceId,fileName:state.fileName,workbook:{path:'workbook.xlsx',sha256:workbookHash,size:workbookBytes.length},state:{path:'state.json',sha256:stateHash,size:stateBytes.length},summary};
   zip.file('manifest.json',JSON.stringify(manifest,null,2));return zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
+}
+async function addSignatureAssetsToSyncZip(zip,operations){
+  const signatureIds=[...new Set(operations.filter(op=>op.entityType==='Signature').map(op=>op.entityId))].sort(),records=signatureIds.length?await collectWorkbookSignatureSyncRecords():new Map(),items=[];
+  for(const signatureId of signatureIds){
+    const record=records.get(signatureId);if(!record)throw s2SignatureBlock('ASSET_MISSING',`AllkiriID ${signatureId} tõendusvara puudub töövihikust.`);
+    const folder=`signatures/${signatureId}`,pngPath=`${folder}/signature.png`,strokesPath=`${folder}/strokes.json`,strokesBytes=new TextEncoder().encode(signatureCanonicalJson(record.asset.strokes));
+    zip.file(pngPath,record.asset.png,{binary:true,compression:'DEFLATE',compressionOptions:{level:6}});zip.file(strokesPath,strokesBytes);
+    items.push({signatureId,png:{path:pngPath,sha256:record.payload.pngHash,size:record.asset.png.length},strokes:{path:strokesPath,sha256:await digest(strokesBytes),contentSha256:record.payload.strokeHash,size:strokesBytes.length,pointCount:record.payload.pointCount}});
+  }
+  return {count:items.length,items};
+}
+function validateParandusSyncPayload(payload,entityId){
+  if(!payload||typeof payload!=='object'||payload.recordId!==entityId||!/^dtc-work-[A-Za-z0-9_-]{1,180}$/.test(String(payload.recordId||''))||!/^EK-[0-9]{3,}$/.test(String(payload.kilpId||''))||persistentSyncId('Puudus',payload.puudusId)!==payload.puudusId||persistentSyncId('Kontroll',payload.kontrollId)!==payload.kontrollId||!String(payload.performedBy||'').trim()||!String(payload.workText||'').trim()||!['Suletud','Osaline'].includes(payload.workStatus)||!Number.isSafeInteger(Number(payload.recordVersion))||Number(payload.recordVersion)<1||!Number.isSafeInteger(Number(payload.performedAtUtcMs))||Number(payload.performedAtUtcMs)<0||Number(payload.performedAtUtcMs)!==Number(payload.exactUtcMs))throw Error('Sünkroonimispaketi Paranduse sisu on vigane.');
+  const allowed=['recordId','kilpId','puudusId','kontrollId','performedBy','performedAtUtcMs','exactUtcMs','workText','checkedBy','workStatus','recordVersion'];if(Object.keys(payload).some(key=>!allowed.includes(key)))throw Error('Sünkroonimispaketi Paranduse sisu sisaldab tundmatut välja.');return true;
+}
+async function readSignatureAssetsFromSyncPackage(archive,manifest,operations){
+  const required=[...new Set(operations.filter(op=>op.entityType==='Signature').map(op=>op.entityId))].sort(),section=manifest.signatureAssets;
+  if(!section||!Number.isSafeInteger(section.count)||!Array.isArray(section.items)||section.count!==section.items.length)throw s2SignatureBlock('ASSET_MISSING','Sünkroonimispaketi allkirjade varaloend puudub või on vigane.');
+  const descriptors=new Map();for(const item of section.items){if(!item||!required.includes(item.signatureId)||descriptors.has(item.signatureId))throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Sünkroonimispaketi allkirjade varaloendis on tundmatu või korduv AllkiriID.');descriptors.set(item.signatureId,item);}
+  if(descriptors.size!==required.length||required.some(id=>!descriptors.has(id)))throw s2SignatureBlock('ASSET_MISSING','Sünkroonimispaketi allkirja PNG või puutepunktid puuduvad.');
+  const assets=new Map();for(const signatureId of required){
+    const item=descriptors.get(signatureId),base=`signatures/${signatureId}/`,pngPath=String(item.png?.path||''),strokesPath=String(item.strokes?.path||'');if(pngPath!==base+'signature.png'||strokesPath!==base+'strokes.json')throw s2SignatureBlock('ASSET_MISSING','Sünkroonimispaketi allkirja vara asukoht on vigane.');
+    const pngFile=archive.file(pngPath),strokesFile=archive.file(strokesPath);if(!pngFile||!strokesFile)throw s2SignatureBlock('ASSET_MISSING','Sünkroonimispaketi allkirja vara puudub.');
+    const png=await pngFile.async('uint8array'),strokesBytes=await strokesFile.async('uint8array');if(png.length!==Number(item.png.size)||strokesBytes.length!==Number(item.strokes.size)||await digest(png)!==item.png.sha256||await digest(strokesBytes)!==item.strokes.sha256)throw s2SignatureBlock('HASH_MISMATCH','Sünkroonimispaketi allkirja vara paketi kontrollsumma ei klapi.');
+    let strokes;try{strokes=JSON.parse(new TextDecoder().decode(strokesBytes));}catch(e){throw s2SignatureBlock('STROKES_INVALID','Sünkroonimispaketi puutepunktide JSON ei ole loetav.');}
+    if(signatureCanonicalJson(strokes)!==new TextDecoder().decode(strokesBytes)||await digest(new TextEncoder().encode(signatureCanonicalJson(strokes)))!==item.strokes.contentSha256||strokes.points?.length!==Number(item.strokes.pointCount))throw s2SignatureBlock('STROKES_INVALID','Sünkroonimispaketi puutepunktide kanooniline sisu ei klapi.');assets.set(signatureId,{signatureId,png,strokes});
+  }
+  for(const op of operations){if(!validSyncOperationShape(op))throw Error('Sünkroonimispaketis on vigane toiming.');if(op.entityType==='Parandus')validateParandusSyncPayload(op.changedFields.payload,op.entityId);if(op.entityType==='Signature'){const payload=op.changedFields.payload;if(payload.signatureId!==op.entityId)throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Sünkroonimistoimingu AllkiriID ei klapi payloadiga.');await validateSignatureSyncPayload(payload,assets.get(op.entityId));}}
+  return assets;
 }
 async function createSyncDeltaBytes(){
   if(!S.zip||!TC.dbId||!TC.sync)throw Error('Enne muudatuste saatmist ava XLSX tööfail.');
-  await persistWorkspace();const operations=cloneData(TC.sync.journal),operationsBytes=new TextEncoder().encode(JSON.stringify(operations)),operationsHash=await digest(operationsBytes),summary=syncOpsSummary(operations),zip=new JSZip();zip.file('operations.json',operationsBytes);
-  const manifest={format:SYNC_PACKAGE_FORMAT,version:1,mode:'delta',createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:TC.dbId,epoch:TC.sync.epoch,senderDeviceId:TC.deviceId,operations:{path:'operations.json',sha256:operationsHash,size:operationsBytes.length,count:operations.length},summary};
+  await persistWorkspace();const operations=cloneData(TC.sync.journal),operationsBytes=new TextEncoder().encode(JSON.stringify(operations)),operationsHash=await digest(operationsBytes),summary=syncOpsSummary(operations),zip=new JSZip();zip.file('operations.json',operationsBytes);const signatureAssets=await addSignatureAssetsToSyncZip(zip,operations);
+  const manifest={format:SYNC_PACKAGE_FORMAT,version:SYNC_PACKAGE_VERSION,mode:'delta',createdAt:new Date().toISOString(),sourceAppVersion:APP_VERSION,dbId:TC.dbId,epoch:TC.sync.epoch,senderDeviceId:TC.deviceId,operations:{path:'operations.json',sha256:operationsHash,size:operationsBytes.length,count:operations.length},signatureAssets,summary};
   zip.file('manifest.json',JSON.stringify(manifest,null,2));return zip.generateAsync({type:'uint8array',compression:'DEFLATE',compressionOptions:{level:6}});
 }
 async function shareSyncBytes(bytes,name,title){
@@ -2113,7 +2222,7 @@ async function validateDirectBaselineBytes(bytes,pairing){
   if(!(bytes instanceof Uint8Array))bytes=new Uint8Array(bytes||[]);if(!bytes.length||bytes.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
   const archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('PACKAGE_INVALID');
   const manifest=JSON.parse(await mf.async('string'));
-  if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==1||manifest.mode!=='baseline'||!manifest.dbId||!manifest.epoch)throw Error('PACKAGE_INVALID');
+  if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==SYNC_PACKAGE_VERSION||manifest.mode!=='baseline'||!manifest.dbId||!manifest.epoch)throw Error('PACKAGE_INVALID');
   if(await digest(new TextEncoder().encode(String(manifest.dbId)))!==pairing.lineage)throw Error('LINEAGE_MISMATCH');
   const stateFile=archive.file(manifest.state?.path||'state.json'),workbookFile=archive.file(manifest.workbook?.path||'workbook.xlsx');
   if(!stateFile||!workbookFile||!Number.isFinite(Number(manifest.state?.size))||!Number.isFinite(Number(manifest.workbook?.size))||Number(manifest.state.size)>DIRECT_SYNC_MAX_PACKAGE_BYTES||Number(manifest.workbook.size)>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PACKAGE_INVALID');
@@ -2255,28 +2364,28 @@ async function processSyncPackageBytes(sourceBytes,fileName='sync.dtcs',clearInp
   try{
     if(TC.startupTask)await TC.startupTask;if(!sourceBytes||TC.busy)return;setBusy(true);markedBusy=true;
     const bytes=new Uint8Array(sourceBytes),archive=await JSZip.loadAsync(bytes,{checkCRC32:true}),mf=archive.file('manifest.json');if(!mf)throw Error('Sünkroonimispaketist puudub manifest.');
-    const manifest=JSON.parse(await mf.async('string'));if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==1||!['baseline','delta'].includes(manifest.mode))throw Error('Seda sünkroonimispaketi versiooni ei toetata.');
+    const manifest=JSON.parse(await mf.async('string'));if(manifest.format!==SYNC_PACKAGE_FORMAT||manifest.version!==SYNC_PACKAGE_VERSION||!['baseline','delta'].includes(manifest.mode))throw Error('Seda sünkroonimispaketi versiooni ei toetata.');
     if(manifest.mode==='baseline'){await importSyncBaseline(archive,manifest,file,options);return;}
     if(!TC.dbId||!TC.sync||!S.zip)throw Error('Ava esmalt sama andmebaasi tööfail või valmista telefon baaspaketiga ette.');
     if(manifest.dbId!==TC.dbId)throw Error('Need tööfailid ei kuulu samasse andmebaasi.');
     if(manifest.epoch!==TC.sync.epoch)throw Error('Sünkroonimispakett kuulub teise tööbaasi algseisu. Valmista teine telefon uuesti ette.');
     const opFile=archive.file(manifest.operations?.path||'operations.json');if(!opFile)throw Error('Sünkroonimispaketist puuduvad muudatused.');
     const opBytes=await opFile.async('uint8array');if(opBytes.length!==manifest.operations.size||await digest(opBytes)!==manifest.operations.sha256)throw Error('Sünkroonimispaketi kontrollsumma ei klapi.');
-    const operations=JSON.parse(new TextDecoder().decode(opBytes));if(!Array.isArray(operations)||operations.length!==manifest.operations.count)throw Error('Sünkroonimispaketi muudatuste loend on vigane.');
+    const operations=JSON.parse(new TextDecoder().decode(opBytes));if(!Array.isArray(operations)||operations.length!==manifest.operations.count)throw Error('Sünkroonimispaketi muudatuste loend on vigane.');const signatureAssets=await readSignatureAssetsFromSyncPackage(archive,manifest,operations);
     const preview=previewSyncOperations(operations),sum={newControls:preview.newControls,newDefects:preview.newDefects,repairedDefects:preview.repairedDefects,updatedDefects:preview.updatedDefects,cabinetStatusChanges:preview.cabinetStatusChanges,otherChanges:preview.otherChanges};diagLog('INFO','SYNC','SEMANTIC_PREPARE',{received:operations.length,duplicates:preview.duplicates,conflicts:preview.conflicts,peer:String(manifest.senderDeviceId||'').slice(0,16),direction:options.directRole||'PACKAGE'});
     let choice='sync';
     if(options.directPrepareOnly||options.directProtocol&&!options.directApplyConfirmed){
       const direction=options.directRole||'TEISEST TELEFONIST';
       choice=await showAppChoice('SÜNKROONIMINE',directSyncPreviewBody(direction,sum,preview),[{value:'sync',label:preview.conflicts?'SÜNKROONI JA LAHENDA VASTUOLUD':'SÜNKROONI',primary:true},{value:'cancel',label:'TÜHISTA'}]);
-      if(choice!=='sync')return {accepted:false,manifest,operations,preview,sum};
+      if(choice!=='sync')return {accepted:false,manifest,operations,signatureAssets,preview,sum};
     }else if(!options.directApplyConfirmed){
       const body=`<b>TEISEST TELEFONIST:</b><div class="topgap">${syncSummaryHtml(sum)}</div><div class="topgap"><b>SELLES TELEFONIS:</b><br>${localPendingSyncCount()} saatmata muudatust</div><div class="topgap"><b>Lisandub või uueneb:</b> ${preview.newOperations}<br><b>Vastuolusid:</b> ${preview.conflicts}<br><b>Juba olemas:</b> ${preview.duplicates}</div>`;
       choice=await showAppChoice('SÜNKROONIMINE',body,[{value:'sync',label:preview.conflicts?'SÜNKROONI JA LAHENDA VASTUOLUD':'SÜNKROONI',primary:true},{value:'cancel',label:'TÜHISTA'}]);
-      if(choice!=='sync')return {accepted:false,manifest,operations,preview,sum};
+      if(choice!=='sync')return {accepted:false,manifest,operations,signatureAssets,preview,sum};
     }
-    if(options.directPrepareOnly)return {accepted:true,manifest,operations,preview,sum};
+    if(options.directPrepareOnly)return {accepted:true,manifest,operations,signatureAssets,preview,sum};
     const conflictChoices={};if(options.directProtocol&&preview.conflictItems.length){setBusy(false);for(const conflict of preview.conflictItems){const pick=await promptSyncConflict(conflict);if(!['local','remote'].includes(pick))return {accepted:false,manifest,operations,preview,sum};conflictChoices[conflict.conflictId]=pick;}setBusy(true);}
-    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null);diagLog('INFO','SYNC','APPLY',{received:operations.length,applied:report.applied,duplicates:report.duplicates,conflicts:report.conflicts,rejected:0,peer:String(manifest.senderDeviceId||'').slice(0,16),direction:options.directRole||'PACKAGE'});if(report.conflicts&&!options.directProtocol)await resolvePendingSyncConflicts(conflictChoices);
+    setBusy(false);const report=await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null,signatureAssets);diagLog('INFO','SYNC','APPLY',{received:operations.length,applied:report.applied,duplicates:report.duplicates,conflicts:report.conflicts,rejected:0,peer:String(manifest.senderDeviceId||'').slice(0,16),direction:options.directRole||'PACKAGE'});if(report.conflicts&&!options.directProtocol)await resolvePendingSyncConflicts(conflictChoices);
     if(options.directProtocol||options.directApplyConfirmed){renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};}
     await showAppChoice('SÜNKROONITUD',`Saadud:<br>${syncSummaryHtml(sum)}<div class="topgap">Telefoni enda muudatused säilitati.<br>Rakendatud: ${report.applied} • Juba olemas: ${report.duplicates} • Vastuolusid lahendati: ${report.conflicts}</div>`,[{value:'done',label:'JÄTKA',primary:true}]);
     renderSyncStatus();return {accepted:true,manifest,operations,preview,sum,report};

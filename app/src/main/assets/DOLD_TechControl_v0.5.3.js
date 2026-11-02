@@ -851,7 +851,8 @@ async function importXlsx(ev,sourceBytes=null){
         if(!selectedInternal){
           const mergedCycle=merged?mergeCurrentCycle(local.cycle,cycle):cycle;
           chosenBytes=await importedZip.generateAsync({type:'uint8array'});chosenName=file.name;
-          Object.assign(TC,{dbId:embedded?.dbId||local.dbId,registryKey:identity.key,registryTokens:identity.tokens,cycle:mergedCycle,sync:local.sync||embedded?.sync||null,signatureVersions:mergeSignatureVersionMaps(local.signatureVersions,embedded?.signatureVersions),guard:local.guard||{remaining:randomGap(),pending:null},revision:Math.max(Number(local.revision)||0,Number(embedded?.revision)||0),updatedAt:embedded?.updatedAt||local.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});
+          const selectedSync=merged?(local.sync||embedded?.sync||null):(embedded?.sync||null);
+          Object.assign(TC,{dbId:embedded?.dbId||local.dbId,registryKey:identity.key,registryTokens:identity.tokens,cycle:mergedCycle,sync:selectedSync,signatureVersions:mergeSignatureVersionMaps(local.signatureVersions,embedded?.signatureVersions),guard:local.guard||{remaining:randomGap(),pending:null},revision:Math.max(Number(local.revision)||0,Number(embedded?.revision)||0),updatedAt:embedded?.updatedAt||local.updatedAt||null,sourceHash:await digest(bytes),baseWorkbookBase64:bytesToBase64(bytes)});
           S.inspector=embedded?.inspector||local.inspector||'';S.dirty=merged||!!local.dirty;
         }
       }
@@ -863,6 +864,7 @@ async function importXlsx(ev,sourceBytes=null){
     }
     TC.ready=false;TC.opened=null;S.stagedDefects=[];
     await loadBook(chosenBytes,chosenName);await refreshFromWorkbook();
+    await validateWorkbookSyncStatePair(TC.sync,!selectedInternal&&!merged?local?.sync:null);
     TC.pending={notice};TC.startupLoaded=true;TC.startupError='';TC.startupWarning='';TC.activated=true;await persistWorkspace();
     $('workTabs').classList.remove('hidden');$('exportBtn').disabled=false;$('shareXlsxBtn').disabled=false;$('sharePackageBtn').disabled=false;$('workbookImportCard').classList.add('hidden');loadMinInspectionSetting();renderStartupWorkspace();renderCyclePanel();showTab('home');
     toast(notice,4000);
@@ -1945,6 +1947,20 @@ async function addSignatureAssetsToSyncZip(zip,operations){
   }
   return {count:items.length,items};
 }
+async function validateWorkbookSyncStatePair(candidateSync,previousSync=null){
+  const candidateOps=Array.isArray(candidateSync?.journal)?candidateSync.journal:[],previousOps=Array.isArray(previousSync?.journal)?previousSync.journal:[];
+  if(candidateSync&&(candidateSync.schema!==1||candidateSync.dbId!==TC.dbId))throw Error('Valitud tööfaili sünkroonimisajalugu ei kuulu sellele tööbaasile. Telefoni varasem töö jäi alles.');
+  await addSignatureAssetsToSyncZip(new JSZip(),candidateOps);
+  if(!previousOps.length)return true;
+  const candidateIds=new Set(candidateOps.map(op=>op?.opId).filter(Boolean)),missing=previousOps.filter(op=>!candidateIds.has(op?.opId));
+  if(!missing.length)return true;
+  const signatureOps=missing.filter(op=>op?.entityType==='Signature');
+  if(signatureOps.length){
+    try{await addSignatureAssetsToSyncZip(new JSZip(),signatureOps);}
+    catch(e){if(e?.signatureCode==='ASSET_MISSING')throw s2SignatureBlock('ASSET_MISSING',`Valitud tööfail ei sisalda kohaliku sünkroonimisajaloo jaoks vajalikku allkirja tõendusvara. ${e.message.replace(/^ASSET_MISSING:\s*/, '')} Telefoni varasem töö jäi alles.`);throw e;}
+  }
+  throw Error(`Valitud tööfaili sünkroonimisajaloost puudub ${missing.length} telefoni salvestatud toimingut. Telefoni varasem töö jäi alles.`);
+}
 function validateParandusSyncPayload(payload,entityId){
   if(!payload||typeof payload!=='object'||payload.recordId!==entityId||!/^dtc-work-[A-Za-z0-9_-]{1,180}$/.test(String(payload.recordId||''))||!/^EK-[0-9]{3,}$/.test(String(payload.kilpId||''))||persistentSyncId('Puudus',payload.puudusId)!==payload.puudusId||persistentSyncId('Kontroll',payload.kontrollId)!==payload.kontrollId||!String(payload.performedBy||'').trim()||!String(payload.workText||'').trim()||!['Suletud','Osaline'].includes(payload.workStatus)||!Number.isSafeInteger(Number(payload.recordVersion))||Number(payload.recordVersion)<1||!Number.isSafeInteger(Number(payload.performedAtUtcMs))||Number(payload.performedAtUtcMs)<0||Number(payload.performedAtUtcMs)!==Number(payload.exactUtcMs))throw Error('Sünkroonimispaketi Paranduse sisu on vigane.');
   const allowed=['recordId','kilpId','puudusId','kontrollId','performedBy','performedAtUtcMs','exactUtcMs','workText','checkedBy','workStatus','recordVersion'];if(Object.keys(payload).some(key=>!allowed.includes(key)))throw Error('Sünkroonimispaketi Paranduse sisu sisaldab tundmatut välja.');return true;
@@ -2074,6 +2090,8 @@ function parseDirectSyncQr(raw,now=Date.now()){
   return {protocol:p.protocol,host:p.host,port:p.port,sessionId:p.sessionId,token:p.token,createdAt:p.createdAt,expiresAt:p.expiresAt,lineage:p.lineage};
 }
 function directSyncErrorText(code){
+  code=String(code||'');
+  if(code==='ASSET_MISSING'||code.startsWith('ASSET_MISSING:'))return 'Sünkroonimispaketti ei saanud ette valmistada, sest aktiivsest tööfailist puudub vajalik allkirja tõendusvara. Telefoni andmeid ei muudetud.';
   if(code==='QR_EXPIRED'||code==='SESSION_EXPIRED')return 'QR-kood on aegunud. Loo esimeses telefonis uus QR.';
   if(code==='AUTH_FAILED')return 'Vale sünkroonimiskood.';
   if(code==='LINEAGE_MISMATCH')return 'Telefonid ei kasuta sama tööbaasi.';
@@ -2350,7 +2368,7 @@ async function handleDirectSyncQr(raw){
       if(!S.zip||!TC.dbId||!TC.sync||TC.dbId!==local.dbId)throw Error('Ava esmalt selles telefonis sama aktiivne tööfail.');
       if(!window.Android||typeof Android.startLanSyncClient!=='function'||typeof Android.getLanSyncClientResult!=='function')throw Error('CONNECTION_FAILED');
       setDirectStatusScreen('ÜHENDAMINE...','Vahetan mõlema telefoni muudatused. Ühtegi muudatust ei rakendata enne kokkuvõtte ja kinnituse kuvamist.');
-      let firstDelta;setBusy(true);try{firstDelta=await createSyncDeltaBytes();}finally{setBusy(false);}
+      let firstDelta;diagLog('INFO','LAN','CLIENT_DELTA_PREPARE',{phase:'INITIAL',session:pairing.sessionId});setBusy(true);try{firstDelta=await createSyncDeltaBytes();}finally{setBusy(false);}
       if(firstDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');
       const hostResponse=await directClientUploadPackage(pairing,TC.dbId,firstDelta,'client-initial'),hostBytes=await directClientReceivePackage(pairing,TC.dbId,hostResponse,'host-delta'),hostDeltaHash=await digest(hostBytes);
       const hostControl=directControlFromBase64(bytesToBase64(hostBytes));
@@ -2365,7 +2383,7 @@ async function handleDirectSyncQr(raw){
       }
       localR4Committed=true;
       setDirectStatusScreen('SÜNKROONIMINE...','Sinu muudatused salvestati. Kinnitan teise telefoni salvestuse.');setBusy(true);
-      const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
+      diagLog('INFO','LAN','CLIENT_DELTA_PREPARE',{phase:'FINAL',session:pairing.sessionId});const clientFinalDelta=await createSyncDeltaBytes();if(clientFinalDelta.length>DIRECT_SYNC_MAX_PACKAGE_BYTES)throw Error('PAYLOAD_TOO_LARGE');const clientDeltaHash=await digest(clientFinalDelta);
       const ackBytes=await directClientUploadPackage(pairing,TC.dbId,clientFinalDelta,'client-final');setBusy(false);closeDirectStatusScreen();
       const ack=validateDirectSyncCommitAck(ackBytes,pairing,{dbId:TC.dbId,epoch:TC.sync.epoch,hostDeviceId:received.manifest.senderDeviceId,clientDeviceId:TC.deviceId,hostDeltaHash,clientDeltaHash});
       diagLog('INFO','LAN','SESSION_COMPLETED',{role:'CLIENT',session:pairing.sessionId,status:'COMMITTED'});await showAppChoice('SÜNKROONITUD',`Saadud:<br>${directSyncSummaryHtml(received.sum||{})}<div class="topgap">Telefoni enda muudatused säilitati.<br>Mõlema telefoni salvestus kinnitati.</div>`,[{value:'done',label:'VALMIS',primary:true}]);renderSyncStatus();return !!ack;

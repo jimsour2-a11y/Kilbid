@@ -254,8 +254,8 @@ public final class LanSyncTransportTest {
         test("23 R1 semantic sync byte entry and file routing remain connected", () -> {
             String source=Files.readString(syncSource);
             check(source.contains("processSyncPackageBytes("),"shared sync byte entry was removed");
-            check(source.contains("async function applySyncOperations(operations,senderDeviceId='',directConflictChoices=null)"),"single semantic merge engine signature was removed");
-            check(source.contains("await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null)"),"sync payload no longer uses the existing semantic merge engine");
+            check(source.contains("async function applySyncOperations(operations,senderDeviceId='',directConflictChoices=null,signatureAssets=null)"),"single semantic merge engine signature was removed");
+            check(source.contains("await applySyncOperations(operations,manifest.senderDeviceId||'',options.directProtocol?conflictChoices:null,signatureAssets)"),"sync payload no longer uses the existing semantic merge engine with Stage 2 signature assets");
             check(source.contains("detectIncomingFileKind(bytes,file.name)"),"manifest file routing was removed");
         });
         System.out.println("R2 LAN transport tests: " + passed + " / " + (passed+failed) + " PASS");

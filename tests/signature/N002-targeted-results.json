@@ -1,0 +1,78 @@
+{
+  "artifact": "N002",
+  "date": "2026-11-02",
+  "baseProductionHead": "060723dbfb72d5ed78cf34ea2376b6d1673a0dbc",
+  "recoveredN001Head": "99332c93afc9fd388ceb076749c6d429941ff5c7",
+  "adapter": "Node VM executing production controller and XLSX editor; XML/form and filesystem bridge adapter, not Android/WebView",
+  "fixtures": [
+    {
+      "file": "04-DOLD_elektrikilbi_sisekontroll_v1.3-4-.xlsx",
+      "sha256": "b2ef38193331963f36798dc1c11b8a9c8bef86df65b0900cd6ec5e95ed750278",
+      "usage": "read-only input; mutations in test workspace only"
+    },
+    {
+      "file": "DOLD_elektrikilbi_sisekontroll_v1.3(8).xlsx",
+      "sha256": "de23b538818bf865b0565df08263f4a091ef530401682fb57a8bedeca3af6458",
+      "usage": "read-only input; mutations in test workspace only"
+    }
+  ],
+  "reproduction": [
+    {
+      "name": "S3 signature commits from repair mode while the workbook is active without an active Kontroll session",
+      "status": "FAIL",
+      "error": "AssertionError [ERR_ASSERTION]: repair mode must allow retry against the active workbook\n    at /workspace/scratch/ae7eb391b13d/Kilbid/tests/headless-regression.cjs:1283:92\n    at async test (/workspace/scratch/ae7eb391b13d/Kilbid/tests/headless-regression.cjs:128:1889)\n    at async /workspace/scratch/ae7eb391b13d/Kilbid/tests/headless-regression.cjs:1277:1"
+    }
+  ],
+  "runs": [
+    {
+      "case": "repair-mode",
+      "adapter": "Node VM with XML/form adapter and fsync-backed bridge; not Android/WebView",
+      "input": "04-DOLD_elektrikilbi_sisekontroll_v1.3-4-.xlsx",
+      "results": [
+        {
+          "name": "S3 signature commits from repair mode while the workbook is active without an active Kontroll session",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "case": "parandus-preservation",
+      "adapter": "Node VM with XML/form adapter and fsync-backed bridge; not Android/WebView",
+      "input": "04-DOLD_elektrikilbi_sisekontroll_v1.3-4-.xlsx",
+      "results": [
+        {
+          "name": "S3 signature saves a permanent Parandus target, auto-opens capture, commits exact strokes and Rich Data, and retries idempotently",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "case": "kontroll-preservation",
+      "adapter": "Node VM with XML/form adapter and fsync-backed bridge; not Android/WebView",
+      "input": "04-DOLD_elektrikilbi_sisekontroll_v1.3-4-.xlsx",
+      "results": [
+        {
+          "name": "S2 signature accepts local Kontroll capture into R4 sheets and Rich Data, then retries idempotently",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "case": "latest-v13",
+      "adapter": "Node VM with XML/form adapter and fsync-backed bridge; not Android/WebView",
+      "input": "DOLD_elektrikilbi_sisekontroll_v1.3(8).xlsx",
+      "results": [
+        {
+          "name": "S3 signature commits from repair mode while the workbook is active without an active Kontroll session",
+          "status": "PASS"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "No physical phone test",
+    "No APK build",
+    "No signature synchronization acceptance",
+    "No full regression suite"
+  ]
+}

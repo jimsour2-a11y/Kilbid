@@ -1480,7 +1480,7 @@ function onNativeSignatureCaptureError(message){
   toast(message||'Allkirjastamist ei saanud alustada.',4500);
 }
 async function signatureDraftWorkbookStatus(draft){
-  if(!['Kontroll','Parandus'].includes(draft?.targetType)||!TC.ready||!S.zip)return {label:'Tööfailis lisamata',saved:false,retryable:false};
+  if(!['Kontroll','Parandus'].includes(draft?.targetType)||!TC.activated||!S.zip)return {label:'Tööfailis lisamata',saved:false,retryable:false};
   try{
     const signatureDoc=await loadDoc('Allkirjad'),rows=s2SignatureRowsById(signatureDoc,String(draft.signatureId||''));
     if(!rows.length)return {label:'XLSX-i lisamata',saved:false,retryable:true};

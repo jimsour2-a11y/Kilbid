@@ -468,9 +468,21 @@ function planSyncOperation(op){
   if(!TC.sync||!validSyncOperationShape(op))throw Error('Sünkroonimistoiming on vigane.');
   if(op.dbId!==TC.dbId)throw Error('Need tööfailid ei kuulu samasse andmebaasi.');
   if(op.epoch!==TC.sync.epoch)throw Error('Sünkroonimispakett kuulub teise tööbaasi algseisu. Valmista teine telefon uuesti ette.');
-  if(!['Kontroll','Puudus','Cabinet'].includes(op.entityType))throw Error('Sünkroonimistoimingu sisu ei ole toetatud.');
+  if(!['Kontroll','Puudus','Cabinet','Parandus','Signature'].includes(op.entityType))throw Error('Sünkroonimistoimingu sisu ei ole toetatud.');
   if(TC.sync.appliedOps.includes(op.opId))return {duplicate:true,applyFields:{},sameFields:[],conflicts:[]};
   const entity=TC.sync.entities[op.entityType][op.entityId]||{values:{},fieldVersions:{},revision:0},applyFields={},sameFields=[],conflicts=[];
+  if(op.entityType==='Parandus'){
+    const incoming=op.changedFields.payload,current=entity.values?.payload;if(!current)return {duplicate:false,applyFields:{payload:incoming},sameFields:[],conflicts:[]};
+    if(!fieldValueEqual(current,incoming))throw Error(`PARANDUS_ID_CONFLICT: ParandusID ${op.entityId} sisu on erinev.`);return {duplicate:false,applyFields:{},sameFields:['payload'],conflicts:[]};
+  }
+  if(op.entityType==='Signature'){
+    const incoming=op.changedFields.payload,current=entity.values?.payload;if(!current)return {duplicate:false,applyFields:{payload:incoming},sameFields:[],conflicts:[]};
+    if(signatureCanonicalJson(signatureImmutablePayload(current))!==signatureCanonicalJson(signatureImmutablePayload(incoming)))throw s2SignatureBlock('SIGNATURE_ID_CONFLICT',`AllkiriID ${op.entityId} tõendusandmed on erinevad.`);
+    if(fieldValueEqual(current,incoming))return {duplicate:false,applyFields:{},sameFields:['payload'],conflicts:[]};
+    if(current.status==='Kehtiv'&&incoming.status==='Tühistatud')return {duplicate:false,applyFields:{payload:incoming},sameFields:[],conflicts:[]};
+    if(current.status==='Tühistatud'&&incoming.status==='Kehtiv')return {duplicate:false,applyFields:{},sameFields:['payload'],conflicts:[]};
+    throw s2SignatureBlock('SIGNATURE_ID_CONFLICT',`AllkiriID ${op.entityId} tühistamisandmed on erinevad.`);
+  }
   for(const [field,remoteValue] of Object.entries(op.changedFields)){
     const baseVersion=op.baseFieldVersions?.[field]||null,currentVersion=entity.fieldVersions?.[field]||null,currentValue=entity.values?.[field]??null;
     if(entity.resolvedFieldVersions?.[field]?.includes(op.opId)){sameFields.push(field);continue;}
@@ -605,8 +617,37 @@ async function writeIncomingDefect(op,fields,values){
   S.zip.file(S.paths.Puudused,xmlStr(doc));rememberIncomingRow('Puudus',op.entityId,row);
   const cycle=TC.cycle,link=cycle?.entries?.[values.cabinetId];if(cycle&&values.cycleId===cycle.id&&link){if(!values.kontrollId||!link.kontrollId||link.kontrollId===values.kontrollId)link.defectRows=[...new Set([...(link.defectRows||[]),row])];else{link.previousControlDefects??={};link.previousControlDefects[values.kontrollId]=[...new Set([...(link.previousControlDefects[values.kontrollId]||[]),row])];}}
 }
-async function applySyncOperationToWorkbook(op,plan){
-  const fields=plan.applyFields;if(!Object.keys(fields).length)return;
+async function writeIncomingParandus(op,payload){
+  validateParandusSyncPayload(payload,op.entityId);const doc=await loadDoc('Parandused'),matches=s2Rows(doc,5,500).filter(row=>s2CellString(doc,'A',row)===op.entityId);
+  if(matches.length){if(matches.length!==1)throw Error(`PARANDUS_ID_CONFLICT: ParandusID ${op.entityId} kordub töövihikus.`);const current=TC.parandused.find(r=>r.recordId===op.entityId);if(!current||!fieldValueEqual(syncParandusValues(current),payload))throw Error(`PARANDUS_ID_CONFLICT: ParandusID ${op.entityId} töövihiku sisu on erinev.`);return;}
+  const defectDoc=await loadDoc('Puudused'),controlDoc=await loadDoc('Kontrollid'),defects=s2Rows(defectDoc,5,1048576).filter(row=>s2CellString(defectDoc,'S',row)===payload.puudusId),controls=s2Rows(controlDoc,5,1048576).filter(row=>s2CellString(controlDoc,'AA',row)===payload.kontrollId);if(defects.length!==1||controls.length!==1||s2CellString(defectDoc,'B',defects[0])!==payload.kilpId||s2CellString(controlDoc,'B',controls[0])!==payload.kilpId||s2CellString(defectDoc,'T',defects[0])!==payload.kontrollId||!s2CellString(defectDoc,'M',defects[0]))throw Error('Sünkroonitava Paranduse PuudusID, KontrollID, KilpID või sulgemisolek ei klapi.');
+  const row=s2AppendParandusRecord(doc,{recordId:payload.recordId,kilpId:payload.kilpId,puudusId:payload.puudusId,kontrollId:payload.kontrollId,performedBy:payload.performedBy,performedAtUtcMs:Number(payload.performedAtUtcMs),workText:payload.workText});
+  if(payload.checkedBy)setInline(doc,'G',row,payload.checkedBy);else clearInput(doc,'G',row);setInline(doc,'H',row,payload.workStatus);setNum(doc,'L',row,Number(payload.recordVersion));s2SetUtcExcelSerial(doc,'E',row,Number(payload.performedAtUtcMs));s2SetUtcExcelSerial(doc,'O',row,Number(payload.exactUtcMs));S.zip.file(S.paths.Parandused,xmlStr(doc));
+}
+async function buildIncomingSignatureState(payload,asset){
+  await validateSignatureSyncPayload(payload,asset);s2RequireSignatureStructure(payload.targetType);const controlDoc=await loadDoc('Kontrollid'),signatureDoc=await loadDoc('Allkirjad'),strokeDoc=await loadDoc('Allkirja_jaljed'),imageDoc=await loadDoc('Allkirjade pildid');await s2ValidateRichDataPackage(S.zip,imageDoc);
+  let targetDoc,targetRow,snapshot;if(payload.targetType==='Kontroll'){targetDoc=controlDoc;targetRow=s2FindControlTarget(controlDoc,payload.targetId,payload.kilpId);snapshot=s2BuildRecordSnapshot(controlDoc,targetRow,payload.targetId,Number(payload.recordVersion));}else{const parandusDoc=await loadDoc('Parandused'),defectDoc=await loadDoc('Puudused');targetDoc=parandusDoc;targetRow=s2FindParandusTarget(parandusDoc,payload.targetId,payload.kilpId);snapshot=s2BuildParandusRecordSnapshot(parandusDoc,targetRow,payload.targetId,Number(payload.recordVersion),defectDoc,controlDoc);}
+  if(signatureCanonicalJson(snapshot)!==payload.recordSnapshotText||await s2RecordSnapshotHash(snapshot)!==payload.recordHash)throw s2SignatureBlock('RECORD_HASH_MISMATCH','Sünkroonitava allkirja sihtkirje ei vasta tõendatud RecordHashile.');
+  const priorPointer=payload.targetType==='Kontroll'?s2CellString(controlDoc,'AB',targetRow):s2CellString(targetDoc,'I',targetRow),existingRows=s2SignatureRowsById(signatureDoc,payload.signatureId);
+  if(existingRows.length){if(existingRows.length!==1)throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Sama AllkiriID kordub töövihikus.');return {existing:true,signatureDoc,strokeDoc,imageDoc,targetDoc,controlDoc,targetRow,priorPointer};}
+  if(priorPointer&&priorPointer!==payload.priorSignatureId)throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Allkirja sihtkirje viitab teisele sõltumatule AllkiriID-le.');
+  const draft={schemaVersion:1,status:'S1_DRAFT',signatureId:payload.signatureId,targetType:payload.targetType,recordId:payload.targetId,recordVersion:Number(payload.recordVersion),recordVersionSource:s2VersionSource(payload.targetType),kilpId:payload.kilpId,signerName:payload.signerName,nonce:payload.nonce,captureStartedAtUtcMs:Number(payload.captureStartedAtUtcMs),captureEndedAtUtcMs:Number(payload.captureEndedAtUtcMs),captureDurationMs:Number(payload.captureDurationMs),clockSource:payload.clockSource,inputMethod:payload.inputMethod,strokeCount:Number(payload.strokeCount),pointCount:Number(payload.pointCount),canvasWidthPx:Number(payload.canvasWidthPx),canvasHeightPx:Number(payload.canvasHeightPx),points:asset.strokes.points,pngHash:payload.pngHash,strokeHash:payload.strokeHash,rendererProfile:payload.rendererProfile,deviceInstanceId:payload.deviceInstanceId,appVersionName:payload.appVersionName,appVersionCode:Number(payload.appVersionCode),androidRelease:payload.androidRelease,androidApiLevel:Number(payload.androidApiLevel)};
+  const state={draft,strokes:asset.strokes,png:asset.png,proof:payload.proof,proofHash:payload.proofHash,recordSnapshot:payload.recordSnapshot,recordHash:payload.recordHash,controlDoc,targetDoc,targetType:payload.targetType,signatureDoc,strokeDoc,imageDoc,targetRow,recordVersion:Number(payload.recordVersion),signatureRow:s2FindFreeSignatureRow(signatureDoc),pictureRow:s2FindFreePictureRow(imageDoc),mediaPath:`xl/media/dold_sig_${payload.pngHash}.png`,priorSignatureId:payload.priorSignatureId||''};if(payload.targetType==='Parandus')state.parandusDoc=targetDoc;return state;
+}
+async function verifyExistingIncomingSignature(payload,asset){
+  const records=await collectWorkbookSignatureSyncRecords(),record=records.get(payload.signatureId);if(!record)throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Sünkroonimisajalugu sisaldab AllkiriID-d, kuid töövihiku tõenduskomplekt puudub.');
+  const payloadMatch=signatureCanonicalJson(signatureImmutablePayload(record.payload))===signatureCanonicalJson(signatureImmutablePayload(payload)),strokesMatch=signatureCanonicalJson(record.asset.strokes)===signatureCanonicalJson(asset.strokes),pngMatch=await digest(record.asset.png)===await digest(asset.png);if(!payloadMatch||record.payload.pngHash!==payload.pngHash||record.payload.strokeHash!==payload.strokeHash||!strokesMatch||!pngMatch)throw s2SignatureBlock('SIGNATURE_ID_CONFLICT',`Sama AllkiriID on töövihikus teise tõenduskomplektiga (payload=${payloadMatch}, strokes=${strokesMatch}, png=${pngMatch}).`);
+  return record;
+}
+async function writeIncomingSignature(op,payload,asset){
+  const state=await buildIncomingSignatureState(payload,asset);if(state.existing){const existing=await verifyExistingIncomingSignature(payload,asset);if(existing.payload.status===payload.status)return;if(existing.payload.status==='Tühistatud'&&payload.status==='Kehtiv')return;if(existing.payload.status!=='Kehtiv'||payload.status!=='Tühistatud')throw s2SignatureBlock('SIGNATURE_ID_CONFLICT','Sama AllkiriID tühistamisandmed on vastuolus.');
+    const candidate=cloneWorkbook(S.zip),signatureDoc=await s2ParsePart(candidate,S.paths.Allkirjad);await s2MarkSignatureRevoked(signatureDoc,payload.signatureId,payload.targetId,payload.revocationReason,Number(payload.revokedAtUtcMs),payload.targetType);candidate.file(S.paths.Allkirjad,xmlStr(signatureDoc));const targetPath=payload.targetType==='Kontroll'?S.paths.Kontrollid:S.paths.Parandused,targetDoc=await s2ParsePart(candidate,targetPath),pointerCol=payload.targetType==='Kontroll'?'AB':'I';if(s2CellString(targetDoc,pointerCol,state.targetRow)===payload.signatureId){clearInput(targetDoc,pointerCol,state.targetRow);if(payload.targetType==='Parandus')s2SetFormulaCached(targetDoc,'J',state.targetRow,s2ParandusStatusFormula(targetDoc,state.targetRow),'Tühistatud','string');candidate.file(targetPath,xmlStr(targetDoc));}S.zip=candidate;return;}
+  let candidate=await s2AppendProductionSignature(state);if(payload.status==='Tühistatud'){
+    const signatureDoc=await s2ParsePart(candidate,S.paths.Allkirjad);await s2MarkSignatureRevoked(signatureDoc,payload.signatureId,payload.targetId,payload.revocationReason,Number(payload.revokedAtUtcMs),payload.targetType);candidate.file(S.paths.Allkirjad,xmlStr(signatureDoc));const targetPath=payload.targetType==='Kontroll'?S.paths.Kontrollid:S.paths.Parandused,targetDoc=await s2ParsePart(candidate,targetPath),pointerCol=payload.targetType==='Kontroll'?'AB':'I';if(s2CellString(targetDoc,pointerCol,state.targetRow)===payload.signatureId){clearInput(targetDoc,pointerCol,state.targetRow);if(payload.targetType==='Parandus')s2SetFormulaCached(targetDoc,'J',state.targetRow,s2ParandusStatusFormula(targetDoc,state.targetRow),'Tühistatud','string');candidate.file(targetPath,xmlStr(targetDoc));}
+  }S.zip=candidate;
+}
+async function applySyncOperationToWorkbook(op,plan,signatureAssets=null){
+  const fields=plan.applyFields;if(op.entityType==='Parandus'){await writeIncomingParandus(op,op.changedFields.payload);return;}if(op.entityType==='Signature'){const asset=signatureAssets?.get(op.entityId);if(!asset)throw s2SignatureBlock('ASSET_MISSING','Sünkroonitava allkirja tõendusvara puudub.');await writeIncomingSignature(op,op.changedFields.payload,asset);return;}if(!Object.keys(fields).length)return;
   const entity=TC.sync.entities[op.entityType]?.[op.entityId],values={...(entity?.values||{}),...fields};
   if(op.entityType==='Kontroll'){await writeIncomingControl(op,fields,values);return;}
   if(op.entityType==='Puudus'){await writeIncomingDefect(op,fields,values);return;}
@@ -617,14 +658,14 @@ async function applySyncOperationToWorkbook(op,plan){
   }
   throw Error('Sünkroonitud kirjeliik ei ole toetatud.');
 }
-async function applySyncOperations(operations,senderDeviceId='',directConflictChoices=null){
+async function applySyncOperations(operations,senderDeviceId='',directConflictChoices=null,signatureAssets=null){
   if(!Array.isArray(operations))throw Error('Sünkroonimispaketis puudub muudatuste loend.');
   const report={applied:0,duplicates:0,conflicts:0};
   const ok=await transaction(async()=>{
     TC.pendingSemanticRows={Kontroll:{},Puudus:{}};
     for(const op of operations){
       const plan=planSyncOperation(op);if(plan.duplicate){report.duplicates++;continue;}
-      await applySyncOperationToWorkbook(op,plan);commitSyncOperation(op,plan);report.applied++;report.conflicts+=plan.conflicts.length;
+      await applySyncOperationToWorkbook(op,plan,signatureAssets);commitSyncOperation(op,plan);report.applied++;report.conflicts+=plan.conflicts.length;
     }
     if(directConflictChoices){
       for(const [conflictId,choice] of Object.entries(directConflictChoices)){

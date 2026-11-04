@@ -32,5 +32,21 @@ jobs:
       - name: Compile Android Java (TEST CI only)
         run: gradle --no-daemon :app:compileDebugJavaWithJavac
 
-      - name: Run Android JVM unit tests (A2 will add tests)
+      - name: Run Android JVM unit tests (v1 untouched)
         run: gradle --no-daemon :app:testDebugUnitTest
+
+      - name: Verify A2 reader JUnit tests and library build
+        run: gradle --no-daemon :v2reader:testDebugUnitTest :v2reader:assembleDebug
+
+      - name: Verify tests were actually executed
+        run: |
+          test -s v2reader/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2reader.WorkPackageReaderTest.xml
+          python3 - <<'PYXML'
+          import xml.etree.ElementTree as ET
+          f = "v2reader/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2reader.WorkPackageReaderTest.xml"
+          root = ET.parse(f).getroot()
+          assert int(root.attrib.get("tests", "0")) >= 10, "A2 JUnit tests missing"
+          assert int(root.attrib.get("failures", "0")) == 0
+          assert int(root.attrib.get("errors", "0")) == 0
+          print("A2 JUnit executed:", root.attrib.get("tests"))
+          PYXML

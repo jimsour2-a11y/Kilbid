@@ -1,0 +1,23 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'ee.dold.techcontrol.v2reader'
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 26
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Shared JVM/Android JSON parser with strict duplicate-key detection.
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
+    testImplementation 'junit:junit:4.13.2'
+}

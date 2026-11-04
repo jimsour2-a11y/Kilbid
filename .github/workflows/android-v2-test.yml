@@ -38,8 +38,8 @@ jobs:
       - name: Verify A2 reader JUnit tests and library build
         run: gradle --no-daemon :v2reader:testDebugUnitTest :v2reader:assembleDebug
 
-      - name: Verify A3 SQLite JUnit tests and library build
-        run: gradle --no-daemon :v2storage:testDebugUnitTest :v2storage:assembleDebug
+      - name: Verify A3 SQLite and A4.1 TEST host
+        run: gradle --no-daemon :v2storage:testDebugUnitTest :v2storage:assembleDebug :v2testhost:testDebugUnitTest :v2testhost:assembleDebug
 
       - name: Verify A2 and A3 tests were actually executed
         run: |
@@ -47,7 +47,8 @@ jobs:
           import pathlib, xml.etree.ElementTree as ET
           expected = {
               "v2reader/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2reader.WorkPackageReaderTest.xml": 10,
-              "v2storage/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2storage.WorkPackageStoreTest.xml": 10,
+              "v2storage/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2storage.WorkPackageStoreTest.xml": 12,
+              "v2testhost/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2test.MainActivityTest.xml": 8,
           }
           total = 0
           for path, minimum in expected.items():
@@ -55,10 +56,25 @@ jobs:
               assert f.is_file() and f.stat().st_size > 0, f"JUnit XML missing: {path}"
               root = ET.parse(f).getroot()
               tests = int(root.attrib.get("tests", "0"))
-              assert tests >= minimum, f"Expected at least {minimum} executed tests in {path}, got {tests}"
+              if path.startswith("v2testhost/"):
+                  assert tests == minimum, f"Expected exactly {minimum} A4.1 tests in {path}, got {tests}"
+              else:
+                  assert tests >= minimum, f"Expected at least {minimum} executed tests in {path}, got {tests}"
               assert int(root.attrib.get("failures", "0")) == 0
               assert int(root.attrib.get("errors", "0")) == 0
               total += tests
               print(f"{path}: executed {tests}, failures=0, errors=0")
-          print("A2 + A3 JUnit executed:", total)
+          print("A2 + A3 + A4.1 JUnit executed:", total)
           PYXML
+
+      - name: Upload TEST host APK and JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dold-android-v2-a4-1-test-candidate
+          path: |
+            v2testhost/build/outputs/apk/debug/v2testhost-debug.apk
+            v2reader/build/test-results/testDebugUnitTest/*.xml
+            v2storage/build/test-results/testDebugUnitTest/*.xml
+            v2testhost/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: warn

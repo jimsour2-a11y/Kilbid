@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">DOLD TechControl v2 TEST</string>
+    <string name="import_button">Impordi TEST-pakett</string>
+    <string name="empty_state">TEST-pakett pole veel imporditud.</string>
+</resources>

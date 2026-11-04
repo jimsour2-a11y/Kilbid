@@ -16,3 +16,4 @@ rootProject.name = "Kilbikontroll"
 include ':app'
 include ':v2reader'
 include ':v2storage'
+include ':v2testhost'

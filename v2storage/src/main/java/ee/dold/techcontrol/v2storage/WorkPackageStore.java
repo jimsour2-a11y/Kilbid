@@ -37,6 +37,19 @@ public final class WorkPackageStore implements Closeable {
         StoreException(String code, String message, Throwable cause) { super(message, cause); this.code = code; }
     }
 
+    /** Read-only view of the newest committed TEST import receipt. */
+    public static final class StoredReceipt {
+        public final String packageId;
+        public final String snapshotId;
+        public final String datasetId;
+        public final String archiveSha256;
+        public final long importedAtUtc;
+        StoredReceipt(String packageId, String snapshotId, String datasetId, String archiveSha256, long importedAtUtc) {
+            this.packageId = packageId; this.snapshotId = snapshotId; this.datasetId = datasetId;
+            this.archiveSha256 = archiveSha256; this.importedAtUtc = importedAtUtc;
+        }
+    }
+
     /** Read-only record view. rawJson retains all fields from the source record. */
     public static final class StoredRecord {
         public final String id;
@@ -186,6 +199,17 @@ public final class WorkPackageStore implements Closeable {
             if (!c.moveToFirst()) return null;
             int revision = c.isNull(1) ? -1 : c.getInt(1);
             return new StoredRecord(c.getString(0), revision, c.getString(2));
+        } finally { c.close(); }
+    }
+
+    /** Returns newest committed receipt from the existing journal, without a schema change. */
+    public StoredReceipt getLatestReceipt() {
+        Cursor c = helper.getReadableDatabase().query("package_receipts",
+                new String[]{"package_id", "snapshot_id", "dataset_id", "archive_sha256", "imported_at_utc"},
+                "dataset_id=?", new String[]{TEST_DATASET}, null, null, "imported_at_utc DESC, package_id ASC", "1");
+        try {
+            if (!c.moveToFirst()) return null;
+            return new StoredReceipt(c.getString(0), c.getString(1), c.getString(2), c.getString(3), c.getLong(4));
         } finally { c.close(); }
     }
 

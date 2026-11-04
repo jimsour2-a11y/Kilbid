@@ -66,6 +66,16 @@ public class WorkPackageStoreTest {
         assertEquals("TEST-A1-TASK-001", store.getRecheckTask("TEST-A1-TASK-001").id);
     }
 
+    @Test public void committedReceiptMetadataCanBeReadBackWithoutSchemaChanges() throws Exception {
+        store.importPackage(fixture(), DATASET);
+        WorkPackageStore.StoredReceipt receipt = store.getLatestReceipt();
+        assertNotNull(receipt);
+        assertEquals("TEST-A1-PACKAGE-001", receipt.packageId);
+        assertEquals("TEST-A1-SNAPSHOT-001", receipt.snapshotId);
+        assertEquals(DATASET, receipt.datasetId);
+        assertEquals(hash(fixture()), receipt.archiveSha256);
+    }
+
     @Test public void originalRecordFieldsAndRevisionArePreserved() throws Exception {
         store.importPackage(fixture(), DATASET);
         WorkPackageStore.StoredRecord inspection = store.getPreviousInspection("TEST-A1-KONTROLL-001");

@@ -137,11 +137,28 @@ public final class WorkPackageStore implements Closeable {
         v.put("dataset_id", TEST_DATASET);
         v.put(idColumn, id);
         if (links != null) {
-            if ("recheck_tasks".equals(table)) v.put("type", text(record, "type"));
-            put(v, "kilp_id", links, "kilpId");
-            put(v, "kontroll_id", links, "kontrollId");
-            put(v, "puudus_id", links, "puudusId");
-            put(v, "parandus_id", links, "parandusId");
+            // Only write columns that exist in the corresponding SQLite table.
+            switch (table) {
+                case "inspections":
+                    put(v, "kilp_id", links, "kilpId");
+                    break;
+                case "defects":
+                    put(v, "kilp_id", links, "kilpId");
+                    put(v, "kontroll_id", links, "kontrollId");
+                    break;
+                case "repairs":
+                    put(v, "puudus_id", links, "puudusId");
+                    break;
+                case "recheck_tasks":
+                    v.put("type", text(record, "type"));
+                    put(v, "kilp_id", links, "kilpId");
+                    put(v, "kontroll_id", links, "kontrollId");
+                    put(v, "puudus_id", links, "puudusId");
+                    put(v, "parandus_id", links, "parandusId");
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unsupported record table: " + table);
+            }
         }
         if (record.has("revision") && record.path("revision").canConvertToInt()) v.put("revision", record.path("revision").asInt());
         else v.putNull("revision");

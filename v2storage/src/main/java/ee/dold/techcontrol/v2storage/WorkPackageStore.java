@@ -12,15 +12,50 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import ee.dold.techcontrol.v2reader.WorkPackageReader;
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.Iterator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /** Isolated durable TEST storage for A3. It has no dependency on :app or v1 storage. */
 public final class WorkPackageStore implements Closeable {
     public static final String TEST_DATASET = "TEST-A1-ISOLATED-20261103";
-    private static final int DB_VERSION = 1;
+    private static final int DB_VERSION = 2;
     private static final ObjectMapper JSON = new ObjectMapper();
 
     public enum ImportStatus { IMPORTED, ALREADY_IMPORTED, UNSUPPORTED_PARTIAL }
+    public enum LocalWriteStatus { CREATED, ALREADY_PRESENT }
+
+    public static final class LocalWriteResult {
+        public final LocalWriteStatus status;
+        public final String changeId;
+        public final String kontrollId;
+        LocalWriteResult(LocalWriteStatus status, String changeId, String kontrollId) {
+            this.status = status; this.changeId = changeId; this.kontrollId = kontrollId;
+        }
+    }
+
+    /** Read-only local change journal entry. This is not a transport package. */
+    public static final class StoredLocalChange {
+        public final String changeId;
+        public final String entityType;
+        public final String operation;
+        public final String entityId;
+        public final int baseRevision;
+        public final int revision;
+        public final String originDeviceId;
+        public final String actorPersonId;
+        public final String occurredAtUtc;
+        public final String payloadJson;
+        public final String payloadSha256;
+        public final String status;
+        StoredLocalChange(String changeId, String entityType, String operation, String entityId,
+                int baseRevision, int revision, String originDeviceId, String actorPersonId,
+                String occurredAtUtc, String payloadJson, String payloadSha256, String status) {
+            this.changeId = changeId; this.entityType = entityType; this.operation = operation; this.entityId = entityId;
+            this.baseRevision = baseRevision; this.revision = revision; this.originDeviceId = originDeviceId;
+            this.actorPersonId = actorPersonId; this.occurredAtUtc = occurredAtUtc;
+            this.payloadJson = payloadJson; this.payloadSha256 = payloadSha256; this.status = status;
+        }
+    }
 
     public static final class ImportResult {
         public final ImportStatus status;
@@ -219,6 +254,109 @@ public final class WorkPackageStore implements Closeable {
     public int getDefectCount() { return count("defects"); }
     public int getRepairCount() { return count("repairs"); }
     public int getTaskCount() { return count("recheck_tasks"); }
+
+    /** Creates one offline TEST inspection and its local journal identity atomically. */
+    public LocalWriteResult createLocalInspection(String changeId, String originDeviceId, JsonNode inspection) throws StoreException {
+        if (empty(changeId) || empty(originDeviceId) || inspection == null || !inspection.isObject())
+            throw new StoreException("IDENTITY", "changeId, originDeviceId and inspection object are required");
+        String kontrollId = text(inspection, "kontrollId");
+        String kilpId = text(inspection, "kilpId");
+        if (empty(kontrollId) || empty(kilpId) || empty(text(inspection, "inspectorPersonId"))
+                || empty(text(inspection, "dateUtc")) || !inspection.has("scores")
+                || !inspection.has("remarks") || !inspection.path("revision").canConvertToInt()
+                || inspection.path("revision").asInt() != 1)
+            throw new StoreException("INSPECTION", "Required Kontroll fields are missing or invalid");
+        String payloadJson = compact(inspection);
+        String payloadSha256 = sha256(payloadJson);
+        SQLiteDatabase db = helper.getWritableDatabase();
+        db.beginTransaction();
+        try {
+            Cursor cabinet = db.query("cabinets", new String[]{"kilp_id"}, "dataset_id=? AND kilp_id=?",
+                    new String[]{TEST_DATASET, kilpId}, null, null, null);
+            try {
+                if (!cabinet.moveToFirst()) throw new StoreException("CABINET_NOT_FOUND", "TEST cabinet does not exist: " + kilpId);
+            } finally { cabinet.close(); }
+
+            Cursor priorChange = db.query("local_changes",
+                    new String[]{"operation", "entity_id", "payload_json", "record_sha256"},
+                    "dataset_id=? AND change_id=?", new String[]{TEST_DATASET, changeId}, null, null, null);
+            try {
+                if (priorChange.moveToFirst()) {
+                    boolean same = "CREATE".equals(priorChange.getString(0))
+                            && kontrollId.equals(priorChange.getString(1))
+                            && payloadSha256.equals(priorChange.getString(3))
+                            && payloadJson.equals(priorChange.getString(2));
+                    if (!same) throw new StoreException("CHANGE_ID_CONFLICT", "changeId already exists with different data");
+                    Cursor existingInspection = db.query("inspections", new String[]{"kilp_id", "raw_json"},
+                            "dataset_id=? AND kontroll_id=?", new String[]{TEST_DATASET, kontrollId}, null, null, null);
+                    try {
+                        if (!existingInspection.moveToFirst() || !kilpId.equals(existingInspection.getString(0))
+                                || !payloadJson.equals(existingInspection.getString(1)))
+                            throw new StoreException("LOCAL_STATE_CONFLICT", "Journal and stored Kontroll do not match");
+                    } finally { existingInspection.close(); }
+                    db.setTransactionSuccessful();
+                    return new LocalWriteResult(LocalWriteStatus.ALREADY_PRESENT, changeId, kontrollId);
+                }
+            } finally { priorChange.close(); }
+
+            Cursor priorInspection = db.query("inspections", new String[]{"kontroll_id"},
+                    "dataset_id=? AND kontroll_id=?", new String[]{TEST_DATASET, kontrollId}, null, null, null);
+            try {
+                if (priorInspection.moveToFirst())
+                    throw new StoreException("KONTROLL_ID_CONFLICT", "KontrollID already exists: " + kontrollId);
+            } finally { priorInspection.close(); }
+
+            ContentValues row = new ContentValues();
+            row.put("dataset_id", TEST_DATASET);
+            row.put("kontroll_id", kontrollId);
+            row.put("kilp_id", kilpId);
+            row.put("revision", inspection.path("revision").asInt());
+            row.put("raw_json", payloadJson);
+            db.insertOrThrow("inspections", null, row);
+
+            ContentValues change = new ContentValues();
+            change.put("dataset_id", TEST_DATASET);
+            change.put("change_id", changeId);
+            change.put("entity_type", "Kontroll");
+            change.put("operation", "CREATE");
+            change.put("entity_id", kontrollId);
+            change.put("base_revision", 0);
+            change.put("revision", 1);
+            change.put("origin_device_id", originDeviceId);
+            change.put("actor_person_id", text(inspection, "inspectorPersonId"));
+            change.put("occurred_at_utc", text(inspection, "dateUtc"));
+            change.put("entity_state_json", payloadJson);
+            change.put("record_sha256", payloadSha256);
+            change.put("status", "PENDING_LOCAL");
+            change.put("created_at_utc", System.currentTimeMillis());
+            db.insertOrThrow("local_changes", null, change);
+            db.setTransactionSuccessful();
+            return new LocalWriteResult(LocalWriteStatus.CREATED, changeId, kontrollId);
+        } catch (StoreException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new StoreException("LOCAL_WRITE_ROLLED_BACK", "Local Kontroll and change journal were rolled back", e);
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    public StoredLocalChange getLocalChange(String changeId) {
+        Cursor c = helper.getReadableDatabase().query("local_changes",
+                new String[]{"change_id", "entity_type", "operation", "entity_id", "base_revision", "revision",
+                        "origin_device_id", "actor_person_id", "occurred_at_utc", "entity_state_json", "record_sha256", "status"},
+                "dataset_id=? AND change_id=?", new String[]{TEST_DATASET, changeId}, null, null, null);
+        try {
+            if (!c.moveToFirst()) return null;
+            return new StoredLocalChange(c.getString(0), c.getString(1), c.getString(2), c.getString(3),
+                    c.getInt(4), c.getInt(5), c.getString(6), c.getString(7), c.getString(8), c.getString(9), c.getString(10), c.getString(11));
+        } finally { c.close(); }
+    }
+
+    public int getLocalChangeCount() {
+        Cursor c = helper.getReadableDatabase().rawQuery("SELECT COUNT(*) FROM local_changes WHERE dataset_id=?", new String[]{TEST_DATASET});
+        try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
+    }
     private int count(String table) {
         Cursor c = helper.getReadableDatabase().rawQuery("SELECT COUNT(*) FROM " + table + " WHERE dataset_id=?", new String[]{TEST_DATASET});
         try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }
@@ -238,6 +376,14 @@ public final class WorkPackageStore implements Closeable {
         try { return JSON.writeValueAsString(n); }
         catch (IOException e) { throw new IllegalStateException("Validated JSON serialization failed", e); }
     }
+    private static String sha256(String text) {
+        try {
+            byte[] bytes = MessageDigest.getInstance("SHA-256").digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(64);
+            for (byte item : bytes) out.append(String.format(java.util.Locale.ROOT, "%02x", item & 255));
+            return out.toString();
+        } catch (NoSuchAlgorithmException e) { throw new AssertionError("SHA-256 missing", e); }
+    }
 
     private static final class DbHelper extends SQLiteOpenHelper {
         DbHelper(Context context, String name) { super(context, name, null, DB_VERSION); }
@@ -250,9 +396,16 @@ public final class WorkPackageStore implements Closeable {
             db.execSQL("CREATE TABLE defects(dataset_id TEXT NOT NULL, puudus_id TEXT NOT NULL, kilp_id TEXT NOT NULL, kontroll_id TEXT NOT NULL, revision INTEGER, raw_json TEXT NOT NULL, PRIMARY KEY(dataset_id, puudus_id), FOREIGN KEY(dataset_id, kilp_id) REFERENCES cabinets(dataset_id, kilp_id), FOREIGN KEY(dataset_id, kontroll_id) REFERENCES inspections(dataset_id, kontroll_id))");
             db.execSQL("CREATE TABLE repairs(dataset_id TEXT NOT NULL, parandus_id TEXT NOT NULL, puudus_id TEXT NOT NULL, revision INTEGER, raw_json TEXT NOT NULL, PRIMARY KEY(dataset_id, parandus_id), FOREIGN KEY(dataset_id, puudus_id) REFERENCES defects(dataset_id, puudus_id))");
             db.execSQL("CREATE TABLE recheck_tasks(dataset_id TEXT NOT NULL, task_id TEXT NOT NULL, type TEXT NOT NULL, kilp_id TEXT NOT NULL, kontroll_id TEXT, puudus_id TEXT, parandus_id TEXT, revision INTEGER, raw_json TEXT NOT NULL, PRIMARY KEY(dataset_id, task_id), FOREIGN KEY(dataset_id, kilp_id) REFERENCES cabinets(dataset_id, kilp_id), FOREIGN KEY(dataset_id, kontroll_id) REFERENCES inspections(dataset_id, kontroll_id), FOREIGN KEY(dataset_id, puudus_id) REFERENCES defects(dataset_id, puudus_id), FOREIGN KEY(dataset_id, parandus_id) REFERENCES repairs(dataset_id, parandus_id))");
+            createLocalChangesTable(db);
         }
         @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            throw new SQLiteException("Refusing destructive v2storage migration " + oldVersion + " -> " + newVersion);
+            if (oldVersion < 2 && newVersion >= 2) {
+                createLocalChangesTable(db);
+            }
+            if (newVersion > 2) throw new SQLiteException("Unsupported v2storage migration " + oldVersion + " -> " + newVersion);
+        }
+        private static void createLocalChangesTable(SQLiteDatabase db) {
+            db.execSQL("CREATE TABLE local_changes(dataset_id TEXT NOT NULL, change_id TEXT NOT NULL, entity_type TEXT NOT NULL, operation TEXT NOT NULL, entity_id TEXT NOT NULL, base_revision INTEGER NOT NULL, revision INTEGER NOT NULL, origin_device_id TEXT NOT NULL, actor_person_id TEXT NOT NULL, occurred_at_utc TEXT NOT NULL, entity_state_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, status TEXT NOT NULL, created_at_utc INTEGER NOT NULL, PRIMARY KEY(dataset_id, change_id), FOREIGN KEY(dataset_id, entity_id) REFERENCES inspections(dataset_id, kontroll_id))");
         }
     }
 }

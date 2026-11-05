@@ -11,6 +11,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.Kilbikontroll">
+        <activity android:name=".V2TestActivity" android:exported="false" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

@@ -353,6 +353,15 @@ public final class WorkPackageStore implements Closeable {
         } finally { c.close(); }
     }
 
+    /** Latest local record is discoverable from SQLite after process death, without UI preferences. */
+    public StoredLocalChange getLatestLocalChange() {
+        Cursor c = helper.getReadableDatabase().query("local_changes",
+                new String[]{"change_id"}, "dataset_id=?", new String[]{TEST_DATASET}, null, null,
+                "created_at_utc DESC, rowid DESC", "1");
+        try { return c.moveToFirst() ? getLocalChange(c.getString(0)) : null; }
+        finally { c.close(); }
+    }
+
     public int getLocalChangeCount() {
         Cursor c = helper.getReadableDatabase().rawQuery("SELECT COUNT(*) FROM local_changes WHERE dataset_id=?", new String[]{TEST_DATASET});
         try { return c.moveToFirst() ? c.getInt(0) : 0; } finally { c.close(); }

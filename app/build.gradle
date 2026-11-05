@@ -15,6 +15,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // TEST branch only: the engineering APK installs beside production v1.
+            applicationIdSuffix '.integratedtest'
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -25,9 +29,16 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    testOptions { unitTests.includeAndroidResources = true }
 }
 
 dependencies {
+    implementation project(':v2reader')
+    implementation project(':v2storage')
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'
     implementation 'androidx.core:core:1.15.0'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }

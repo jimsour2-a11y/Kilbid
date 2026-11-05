@@ -32,8 +32,8 @@ jobs:
       - name: Compile Android Java (TEST CI only)
         run: gradle --no-daemon :app:compileDebugJavaWithJavac
 
-      - name: Run Android JVM unit tests (v1 untouched)
-        run: gradle --no-daemon :app:testDebugUnitTest
+      - name: Test integrated app and assemble isolated engineering APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Verify A2 reader JUnit tests and library build
         run: gradle --no-daemon :v2reader:testDebugUnitTest :v2reader:assembleDebug
@@ -49,6 +49,8 @@ jobs:
               "v2reader/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2reader.WorkPackageReaderTest.xml": 10,
               "v2storage/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2storage.WorkPackageStoreTest.xml": 20,
               "v2testhost/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.v2test.MainActivityTest.xml": 8,
+              "app/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.V2TestActivityTest.xml": 2,
+              "app/build/test-results/testDebugUnitTest/TEST-ee.dold.techcontrol.MainActivityV2EntryTest.xml": 1,
           }
           total = 0
           for path, minimum in expected.items():
@@ -56,7 +58,7 @@ jobs:
               assert f.is_file() and f.stat().st_size > 0, f"JUnit XML missing: {path}"
               root = ET.parse(f).getroot()
               tests = int(root.attrib.get("tests", "0"))
-              if path.startswith("v2testhost/"):
+              if path.startswith("v2testhost/") or path.startswith("app/"):
                   assert tests == minimum, f"Expected exactly {minimum} A4.1 tests in {path}, got {tests}"
               else:
                   assert tests >= minimum, f"Expected at least {minimum} executed tests in {path}, got {tests}"
@@ -67,12 +69,28 @@ jobs:
           print("A2 + A3 + A4.1 JUnit executed:", total)
           PYXML
 
-      - name: Upload JUnit evidence only
+      - name: Inspect isolated debug APK identity and signing
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          BUILD_TOOLS="$(find "$SDK_ROOT/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" | tee app-debug-badging.txt
+          grep -q "package: name='ee.dold.techcontrol.integratedtest'" app-debug-badging.txt
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | tee app-debug-signing.txt
+          sha256sum "$APK" | tee app-debug-sha256.txt
+
+      - name: Upload engineering APK and test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dold-android-v2-local-kontroll-test-evidence
+          name: dold-android-v2-integrated-test-evidence
           path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app-debug-badging.txt
+            app-debug-signing.txt
+            app-debug-sha256.txt
+            app/build/test-results/testDebugUnitTest/*.xml
             v2reader/build/test-results/testDebugUnitTest/*.xml
             v2storage/build/test-results/testDebugUnitTest/*.xml
             v2testhost/build/test-results/testDebugUnitTest/*.xml

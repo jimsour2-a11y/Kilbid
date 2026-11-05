@@ -820,6 +820,9 @@ public class MainActivity extends Activity {
     }
 
     public class AndroidBridge {
+        @JavascriptInterface public void openV2Test() {
+            runOnUiThread(() -> startActivity(new Intent(MainActivity.this, V2TestActivity.class)));
+        }
         @JavascriptInterface public boolean appendDiagnosticEvent(String level,String component,String event,String fieldsJson){
             try{JSONObject fields=fieldsJson==null||fieldsJson.isEmpty()?new JSONObject():new JSONObject(fieldsJson);appendDiagnostic(level,component,event,diagnosticFields(fields));return true;}
             catch(Exception e){appendDiagnostic("ERROR","APP","LOG_APPEND_FAILED",Collections.singletonMap("code","LOG_APPEND_FAILED"));return false;}
